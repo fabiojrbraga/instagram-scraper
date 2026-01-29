@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     openai_api_key: str
     openai_model_text: str = "gpt-4o-mini"
     openai_model_vision: str = "gpt-4o-mini"
+    openai_temperature_text: float = 1.0
+    openai_temperature_vision: float = 1.0
 
     # Instagram (opcional)
     instagram_username: Optional[str] = None

@@ -22,6 +22,8 @@ class AIExtractor:
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model_vision = settings.openai_model_vision  # Para análise de imagens
         self.model_text = settings.openai_model_text  # Para processamento de texto (mais barato)
+        self.temperature_text = settings.openai_temperature_text
+        self.temperature_vision = settings.openai_temperature_vision
 
     async def extract_profile_info(
         self,
@@ -96,7 +98,7 @@ class AIExtractor:
             response = await self.client.chat.completions.create(
                 model=self.model_text,
                 messages=messages,
-                temperature=0.1,  # Baixa temperatura para respostas mais consistentes
+                temperature=self.temperature_text,
             )
 
             # Extrair JSON da resposta
@@ -188,7 +190,7 @@ class AIExtractor:
             response = await self.client.chat.completions.create(
                 model=self.model_text,
                 messages=messages,
-                temperature=0.1,
+                temperature=self.temperature_text,
             )
 
             response_text = response.choices[0].message.content
@@ -277,7 +279,7 @@ class AIExtractor:
             response = await self.client.chat.completions.create(
                 model=self.model_text,
                 messages=messages,
-                temperature=0.1,
+                temperature=self.temperature_text,
             )
 
             response_text = response.choices[0].message.content
@@ -360,7 +362,7 @@ class AIExtractor:
             response = await self.client.chat.completions.create(
                 model=self.model_text,
                 messages=messages,
-                temperature=0.1,
+                temperature=self.temperature_text,
             )
 
             response_text = response.choices[0].message.content
