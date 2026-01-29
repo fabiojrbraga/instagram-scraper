@@ -37,7 +37,7 @@ class Profile(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_scraped_at = Column(DateTime, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
 
     # Relacionamentos
     posts = relationship("Post", back_populates="profile", cascade="all, delete-orphan")
@@ -63,7 +63,7 @@ class Post(Base):
     posted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
 
     # Relacionamentos
     profile = relationship("Profile", back_populates="posts")
@@ -91,7 +91,7 @@ class Interaction(Base):
     comment_replies = Column(Integer, default=0, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
 
     # Relacionamentos
     post = relationship("Post", back_populates="interactions")
@@ -114,7 +114,7 @@ class ScrapingJob(Base):
     posts_scraped = Column(Integer, default=0)
     interactions_scraped = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
 
     def __repr__(self):
         return f"<ScrapingJob(url={self.profile_url}, status={self.status})>"
