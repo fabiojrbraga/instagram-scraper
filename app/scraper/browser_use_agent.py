@@ -23,7 +23,7 @@ class BrowserUseAgent:
     """
 
     def __init__(self):
-        self.model = "gpt-4o-mini"
+        self.model = settings.openai_model_text
         self.api_key = settings.openai_api_key
         self.browserless_host = settings.browserless_host
         self.browserless_token = settings.browserless_token

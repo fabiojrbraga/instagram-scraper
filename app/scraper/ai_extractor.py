@@ -20,8 +20,8 @@ class AIExtractor:
 
     def __init__(self):
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
-        self.model_vision = "gpt-4-vision-preview"  # Para análise de imagens
-        self.model_text = "gpt-4-mini"  # Para processamento de texto (mais barato)
+        self.model_vision = settings.openai_model_vision  # Para análise de imagens
+        self.model_text = settings.openai_model_text  # Para processamento de texto (mais barato)
 
     async def extract_profile_info(
         self,

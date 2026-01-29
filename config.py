@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str
+    openai_model_text: str = "gpt-4o-mini"
+    openai_model_vision: str = "gpt-4o-mini"
 
     # Instagram (opcional)
     instagram_username: Optional[str] = None
