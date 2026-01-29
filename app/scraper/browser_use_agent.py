@@ -6,7 +6,7 @@ Browser Use usa IA para tomar decisões autônomas durante a navegação.
 import logging
 import asyncio
 from typing import Optional, Dict, Any, List
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from datetime import datetime
 
 from browser_use import Agent, BrowserSession, ChatOpenAI
@@ -51,6 +51,25 @@ class BrowserUseAgent:
         separator = "&" if "?" in base_url else "?"
         return f"{base_url}{separator}token={self.browserless_token}"
 
+    def _rewrite_ws_url(self, ws_url: str) -> str:
+        parsed_ws = urlparse(ws_url)
+        if not parsed_ws.scheme.startswith("ws"):
+            return ws_url
+
+        host_parsed = urlparse(self.browserless_host)
+        external_host = host_parsed.netloc or parsed_ws.netloc
+        scheme = "wss" if host_parsed.scheme in ("https", "wss") else "ws"
+
+        if parsed_ws.hostname in ("0.0.0.0", "127.0.0.1", "localhost"):
+            parsed_ws = parsed_ws._replace(netloc=external_host, scheme=scheme)
+
+        query_items = dict(parse_qsl(parsed_ws.query))
+        if "token" not in query_items and self.browserless_token:
+            query_items["token"] = self.browserless_token
+            parsed_ws = parsed_ws._replace(query=urlencode(query_items))
+
+        return urlunparse(parsed_ws)
+
     async def _resolve_browserless_cdp_url(self) -> str:
         """
         Resolve CDP WebSocket URL. Tries explicit WS URL first, then /json/version.
@@ -70,7 +89,7 @@ class BrowserUseAgent:
                     data = resp.json()
                     ws_url = data.get("webSocketDebuggerUrl")
                     if ws_url:
-                        return ws_url
+                        return self._rewrite_ws_url(ws_url)
         except Exception:
             pass
 
