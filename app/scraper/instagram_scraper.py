@@ -11,6 +11,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from app.scraper.browserless_client import BrowserlessClient
+from app.scraper.browser_use_agent import browser_use_agent
 from app.scraper.ai_extractor import AIExtractor
 from app.models import Profile, Post, Interaction, InteractionType
 from app.database import SessionLocal
@@ -74,12 +75,15 @@ class InstagramScraper:
 
             username = self._extract_username_from_url(profile_url)
 
+            storage_state = await browser_use_agent.ensure_instagram_session(db) if db else None
+            cookies = browser_use_agent.get_cookies(storage_state)
+
             # FASE 1: Capturar informações do perfil
             logger.info(f"📸 Capturando informações do perfil: {username}")
             await asyncio.sleep(self._get_random_delay())
 
-            profile_screenshot = await self.browserless.screenshot(profile_url)
-            profile_html = await self.browserless.get_html(profile_url)
+            profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
+            profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
 
             # FASE 2: Extrair informações do perfil com IA
             logger.info(f"🧠 Extraindo informações do perfil com IA...")
@@ -100,6 +104,7 @@ class InstagramScraper:
                 profile_url,
                 max_posts=max_posts,
                 profile_html=profile_html,
+                cookies=cookies,
             )
 
             # FASE 5: Raspar comentários e interações
@@ -109,6 +114,7 @@ class InstagramScraper:
                 post_interactions = await self._scrape_post_interactions(
                     post_data["post_url"],
                     post_data,
+                    cookies=cookies,
                 )
                 interactions.extend(post_interactions)
 
@@ -156,6 +162,7 @@ class InstagramScraper:
         profile_url: str,
         max_posts: int = 5,
         profile_html: Optional[str] = None,
+        cookies: Optional[list[dict]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Raspa posts de um perfil.
@@ -173,7 +180,7 @@ class InstagramScraper:
             await asyncio.sleep(self._get_random_delay())
 
             # Capturar screenshot dos posts
-            posts_screenshot = await self.browserless.screenshot(profile_url)
+            posts_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
 
             # Extrair posts com IA
             posts_data = await self.ai_extractor.extract_posts_info(
@@ -192,6 +199,7 @@ class InstagramScraper:
         self,
         post_url: str,
         post_data: Dict[str, Any],
+        cookies: Optional[list[dict]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Raspa comentários e interações de um post.
@@ -209,7 +217,7 @@ class InstagramScraper:
             await asyncio.sleep(self._get_random_delay(2, 5))
 
             # Capturar screenshot dos comentários
-            comments_screenshot = await self.browserless.screenshot(post_url)
+            comments_screenshot = await self.browserless.screenshot(post_url, cookies=cookies)
 
             # Extrair comentários com IA
             comments = await self.ai_extractor.extract_comments(

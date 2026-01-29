@@ -52,6 +52,7 @@ class BrowserlessClient:
         full_page: bool = True,
         wait_for: Optional[str] = None,
         timeout: int = 30000,
+        cookies: Optional[list[dict]] = None,
     ) -> str:
         """
         Captura screenshot de uma URL.
@@ -74,6 +75,8 @@ class BrowserlessClient:
 
             if wait_for:
                 payload["waitFor"] = wait_for
+            if cookies:
+                payload["cookies"] = cookies
 
             response = await self.client.post(
                 f"{self.host}/screenshot",
@@ -91,8 +94,8 @@ class BrowserlessClient:
                 logger.info(f"✅ Screenshot capturado: {url}")
                 return screenshot_data
 
-            if self._is_field_validation_error(response, ["fullPage", "timeout"]):
-                fallback_payload = self._strip_payload_fields(payload, ["fullPage", "timeout"])
+            if self._is_field_validation_error(response, ["fullPage", "timeout", "cookies"]):
+                fallback_payload = self._strip_payload_fields(payload, ["fullPage", "timeout", "cookies"])
                 response = await self.client.post(
                     f"{self.host}/screenshot",
                     json=fallback_payload,
@@ -119,6 +122,7 @@ class BrowserlessClient:
         url: str,
         wait_for: Optional[str] = None,
         timeout: int = 30000,
+        cookies: Optional[list[dict]] = None,
     ) -> str:
         """
         Obtém HTML de uma URL.
@@ -139,6 +143,8 @@ class BrowserlessClient:
 
             if wait_for:
                 payload["waitFor"] = wait_for
+            if cookies:
+                payload["cookies"] = cookies
 
             response = await self.client.post(
                 f"{self.host}/content",
@@ -158,8 +164,8 @@ class BrowserlessClient:
                 logger.info(f"✅ HTML obtido: {url}")
                 return html
 
-            if self._is_field_validation_error(response, ["timeout"]):
-                fallback_payload = self._strip_payload_fields(payload, ["timeout"])
+            if self._is_field_validation_error(response, ["timeout", "cookies"]):
+                fallback_payload = self._strip_payload_fields(payload, ["timeout", "cookies"])
                 response = await self.client.post(
                     f"{self.host}/content",
                     json=fallback_payload,

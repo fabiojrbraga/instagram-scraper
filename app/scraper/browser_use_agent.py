@@ -5,11 +5,14 @@ Browser Use usa IA para tomar decisões autônomas durante a navegação.
 
 import logging
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
+from datetime import datetime
 
 from browser_use import Agent, BrowserSession, ChatOpenAI
 from config import settings
+from app.models import InstagramSession
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,11 @@ class BrowserUseAgent:
         separator = "&" if "?" in base_url else "?"
         return f"{base_url}{separator}token={self.browserless_token}"
 
+    async def _maybe_await(self, value):
+        if asyncio.iscoroutine(value):
+            return await value
+        return value
+
     async def _safe_stop_session(self, session: BrowserSession) -> None:
         stop_fn = getattr(session, "stop", None)
         if stop_fn is None:
@@ -54,6 +62,109 @@ class BrowserUseAgent:
         result = stop_fn()
         if asyncio.iscoroutine(result):
             await result
+
+    def _get_latest_session(self, db: Session) -> Optional[InstagramSession]:
+        return (
+            db.query(InstagramSession)
+            .filter(InstagramSession.is_active.is_(True))
+            .order_by(InstagramSession.updated_at.desc())
+            .first()
+        )
+
+    def _touch_session(self, db: Session, session: InstagramSession) -> None:
+        session.last_used_at = datetime.utcnow()
+        db.commit()
+
+    def _extract_cookies(self, storage_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        cookies = storage_state.get("cookies") if storage_state else None
+        if isinstance(cookies, list):
+            return cookies
+        return []
+
+    def get_cookies(self, storage_state: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Retorna lista de cookies a partir de um storage_state."""
+        if not storage_state:
+            return []
+        return self._extract_cookies(storage_state)
+
+    async def ensure_instagram_session(self, db: Session) -> Optional[Dict[str, Any]]:
+        """
+        Garante uma sessÃ£o autenticada do Instagram salva no banco.
+        Retorna storage_state quando disponÃ­vel.
+        """
+        if db is None:
+            logger.warning("âš ï¸ SessÃ£o de banco nÃ£o fornecida; login nÃ£o serÃ¡ persistido.")
+            return None
+
+        if not settings.instagram_username or not settings.instagram_password:
+            logger.warning("âš ï¸ INSTAGRAM_USERNAME/PASSWORD nÃ£o configurados; login nÃ£o serÃ¡ feito.")
+            return None
+
+        existing = self._get_latest_session(db)
+        if existing and existing.storage_state:
+            self._touch_session(db, existing)
+            logger.info("âœ… SessÃ£o do Instagram reutilizada do banco.")
+            return existing.storage_state
+
+        return await self._login_and_save_session(db)
+
+    async def _login_and_save_session(self, db: Session) -> Dict[str, Any]:
+        """
+        Faz login via Browser Use e salva storage_state no banco.
+        """
+        logger.info("ðŸ” Iniciando login no Instagram via Browser Use...")
+
+        cdp_url = self._build_browserless_cdp_url()
+        browser_session = BrowserSession(cdp_url=cdp_url)
+        llm = ChatOpenAI(model=self.model, api_key=self.api_key)
+
+        login_task = f"""
+        VocÃª estÃ¡ em um navegador controlado por IA. 
+        Acesse https://www.instagram.com/accounts/login/.
+
+        Passos:
+        1) Se aparecer um modal de cookies, clique em "Allow all cookies" (ou equivalente).
+        2) Preencha o campo de usuÃ¡rio com: {settings.instagram_username}
+        3) Preencha o campo de senha com: {settings.instagram_password}
+        4) Clique em "Log in"/"Entrar".
+        5) Aguarde o feed inicial carregar e confirme que o login foi bem sucedido.
+        6) Se houver challenge/2FA, pare e reporte erro.
+
+        Ao final, confirme sucesso com um texto curto: "LOGIN_OK".
+        """
+
+        agent = Agent(
+            task=login_task,
+            llm=llm,
+            browser_session=browser_session,
+        )
+
+        try:
+            history = await agent.run()
+            if not history.is_done() or not history.is_successful():
+                raise RuntimeError("Login nÃ£o foi concluÃ­do com sucesso.")
+
+            storage_state = await self._maybe_await(
+                browser_session.export_storage_state()
+            )
+
+            if not storage_state or not self._extract_cookies(storage_state):
+                raise RuntimeError("Storage state nÃ£o possui cookies do Instagram.")
+
+            session = InstagramSession(
+                instagram_username=settings.instagram_username,
+                storage_state=storage_state,
+                last_used_at=datetime.utcnow(),
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+            logger.info("âœ… SessÃ£o do Instagram salva no banco.")
+            return storage_state
+
+        finally:
+            await self._safe_stop_session(browser_session)
 
     async def navigate_and_scrape_profile(
         self,

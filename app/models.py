@@ -118,3 +118,19 @@ class ScrapingJob(Base):
 
     def __repr__(self):
         return f"<ScrapingJob(url={self.profile_url}, status={self.status})>"
+
+
+class InstagramSession(Base):
+    """SessÃµes autenticadas do Instagram para reutilizaÃ§Ã£o."""
+    __tablename__ = "instagram_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    instagram_username = Column(String(255), nullable=True, index=True)
+    storage_state = Column(JSON, nullable=False)
+    is_active = Column(Boolean, default=True)
+    last_used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<InstagramSession(username={self.instagram_username}, active={self.is_active})>"
