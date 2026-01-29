@@ -147,7 +147,11 @@ class BrowserlessClient:
             )
 
             if response.status_code == 200:
-                html = response.json().get("data")
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    html = response.json().get("data")
+                else:
+                    html = response.text
                 logger.info(f"✅ HTML obtido: {url}")
                 return html
 
@@ -159,7 +163,11 @@ class BrowserlessClient:
                     headers=self._get_headers(),
                 )
                 if response.status_code == 200:
-                    html = response.json().get("data")
+                    content_type = response.headers.get("content-type", "").lower()
+                    if "application/json" in content_type:
+                        html = response.json().get("data")
+                    else:
+                        html = response.text
                     logger.info(f"✅ HTML obtido (fallback): {url}")
                     return html
 
