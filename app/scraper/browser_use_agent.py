@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from datetime import datetime
 
 from browser_use import Agent, BrowserSession, ChatOpenAI
+import httpx
 from config import settings
 from app.models import InstagramSession
 from sqlalchemy.orm import Session
@@ -49,6 +50,31 @@ class BrowserUseAgent:
 
         separator = "&" if "?" in base_url else "?"
         return f"{base_url}{separator}token={self.browserless_token}"
+
+    async def _resolve_browserless_cdp_url(self) -> str:
+        """
+        Resolve CDP WebSocket URL. Tries explicit WS URL first, then /json/version.
+        """
+        if self.browserless_ws_url:
+            return self._build_browserless_cdp_url()
+
+        host = self.browserless_host.rstrip("/")
+        if not host.startswith("http"):
+            return self._build_browserless_cdp_url()
+
+        version_url = f"{host}/json/version?token={self.browserless_token}"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(version_url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    ws_url = data.get("webSocketDebuggerUrl")
+                    if ws_url:
+                        return ws_url
+        except Exception:
+            pass
+
+        return self._build_browserless_cdp_url()
 
     async def _maybe_await(self, value):
         if asyncio.iscoroutine(value):
@@ -114,7 +140,7 @@ class BrowserUseAgent:
         """
         logger.info("ðŸ” Iniciando login no Instagram via Browser Use...")
 
-        cdp_url = self._build_browserless_cdp_url()
+        cdp_url = await self._resolve_browserless_cdp_url()
         browser_session = BrowserSession(cdp_url=cdp_url)
         llm = ChatOpenAI(model=self.model, api_key=self.api_key)
 
@@ -129,6 +155,10 @@ class BrowserUseAgent:
         4) Clique em "Log in"/"Entrar".
         5) Aguarde o feed inicial carregar e confirme que o login foi bem sucedido.
         6) Se houver challenge/2FA, pare e reporte erro.
+
+        Importante:
+        - Use apenas a aba atual (nÃ£o abrir nova aba).
+        - Aguarde o DOM carregar; se ficar vazio, aguarde alguns segundos e recarregue uma vez.
 
         Ao final, confirme sucesso com um texto curto: "LOGIN_OK".
         """
@@ -187,7 +217,7 @@ class BrowserUseAgent:
             if not self.api_key:
                 raise ValueError("OPENAI_API_KEY is required for Browser Use.")
 
-            cdp_url = self._build_browserless_cdp_url()
+            cdp_url = await self._resolve_browserless_cdp_url()
 
             task = f"""
             Acesse o perfil do Instagram em {profile_url} e:
