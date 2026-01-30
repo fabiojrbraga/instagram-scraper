@@ -32,6 +32,9 @@ class BrowserUseAgent:
         self.browserless_host = settings.browserless_host
         self.browserless_token = settings.browserless_token
         self.browserless_ws_url = settings.browserless_ws_url
+        # Reduce noisy logs that may include sensitive task details.
+        logging.getLogger("browser_use").setLevel(logging.WARNING)
+        logging.getLogger("browser_use.Agent").setLevel(logging.WARNING)
 
     def _build_browserless_cdp_url(self) -> str:
         if not self.browserless_token:
@@ -156,6 +159,44 @@ class BrowserUseAgent:
             return []
         return self._extract_cookies(storage_state)
 
+    def _build_cookie_jar(self, cookies: List[Dict[str, Any]]) -> httpx.Cookies:
+        jar = httpx.Cookies()
+        for cookie in cookies:
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not name or value is None:
+                continue
+            domain = (cookie.get("domain") or "instagram.com").lstrip(".")
+            path = cookie.get("path") or "/"
+            jar.set(name, value, domain=domain, path=path)
+        return jar
+
+    async def _is_session_valid(self, storage_state: Dict[str, Any]) -> bool:
+        """
+        Verifica se o storage_state ainda representa uma sessao autenticada.
+        """
+        cookies = self._extract_cookies(storage_state)
+        if not cookies:
+            return False
+
+        jar = self._build_cookie_jar(cookies)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get("https://www.instagram.com/accounts/edit/", cookies=jar, headers=headers)
+        except Exception:
+            return False
+
+        if resp.url and "login" in str(resp.url):
+            return False
+        text = (resp.text or "").lower()
+        if "login" in text and ("password" in text or "senha" in text):
+            return False
+
+        return resp.status_code == 200
+
     async def ensure_instagram_session(self, db: Session) -> Optional[Dict[str, Any]]:
         """
         Garante uma sessÃ£o autenticada do Instagram salva no banco.
@@ -168,12 +209,15 @@ class BrowserUseAgent:
         if not settings.instagram_username or not settings.instagram_password:
             logger.warning("âš ï¸ INSTAGRAM_USERNAME/PASSWORD nÃ£o configurados; login nÃ£o serÃ¡ feito.")
             return None
-
         existing = self._get_latest_session(db)
         if existing and existing.storage_state:
-            self._touch_session(db, existing)
-            logger.info("âœ… SessÃ£o do Instagram reutilizada do banco.")
-            return existing.storage_state
+            if await self._is_session_valid(existing.storage_state):
+                self._touch_session(db, existing)
+                logger.info("Session do Instagram reutilizada do banco.")
+                return existing.storage_state
+            existing.is_active = False
+            db.commit()
+            logger.warning("Sessao do Instagram invalida; realizando novo login.")
 
         return await self._login_and_save_session(db)
 
