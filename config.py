@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     browserless_session_ttl_ms: int = 300000
     browserless_session_stealth: bool = False
     browserless_session_headless: bool = True
+    browserless_reconnect_timeout_ms: int = 60000
     browser_use_max_retries: int = 3
     browser_use_retry_backoff: int = 2
 

@@ -143,7 +143,7 @@ class BrowserUseAgent:
             return {}
 
         host = self._build_browserless_http_url()
-        url = f"{host}/session?token={self.browserless_token}"
+        session_paths = ("/session", "/chromium/session")
         payload = {
             "ttl": settings.browserless_session_ttl_ms,
             "stealth": settings.browserless_session_stealth,
@@ -151,10 +151,25 @@ class BrowserUseAgent:
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code >= 400:
-                raise RuntimeError(f"Erro ao criar sessao Browserless: {resp.status_code} {resp.text}")
-            return resp.json()
+            last_error = None
+            for path in session_paths:
+                url = f"{host}{path}?token={self.browserless_token}"
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 404:
+                    last_error = resp
+                    continue
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Erro ao criar sessao Browserless: {resp.status_code} {resp.text}")
+                return resp.json()
+
+            if last_error is not None:
+                logger.warning(
+                    "API de sessao do Browserless indisponivel (%s %s). Usando CDP padrao.",
+                    last_error.status_code,
+                    last_error.text,
+                )
+                return {}
+            return {}
 
     async def _stop_browserless_session(self, stop_url: str) -> None:
         if not stop_url:
@@ -257,6 +272,92 @@ class BrowserUseAgent:
         info = storage_state.get("_browserless_session")
         return info if isinstance(info, dict) else {}
 
+    def _get_browserless_reconnect_url(self, storage_state: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not storage_state:
+            return None
+        reconnect_url = storage_state.get("_browserless_reconnect")
+        return reconnect_url if isinstance(reconnect_url, str) and reconnect_url else None
+
+    def _ensure_ws_token(self, ws_url: str) -> str:
+        if "token=" in ws_url:
+            return ws_url
+        separator = "&" if "?" in ws_url else "?"
+        return f"{ws_url}{separator}token={self.browserless_token}"
+
+    async def _send_cdp_command(
+        self,
+        browser_session: BrowserSession,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        params = params or {}
+        candidates = []
+        for attr in ("cdp_client_root", "_cdp_client_root", "cdp_client", "_cdp_client"):
+            client = getattr(browser_session, attr, None)
+            if client:
+                candidates.append(client)
+        cdp_session = getattr(browser_session, "cdp_session", None)
+        if cdp_session is not None:
+            for attr in ("cdp_client", "_cdp_client"):
+                client = getattr(cdp_session, attr, None)
+                if client:
+                    candidates.append(client)
+
+        for client in candidates:
+            send = getattr(client, "send", None)
+            if callable(send):
+                try:
+                    return await self._maybe_await(send(method, params))
+                except Exception:
+                    pass
+            send_raw = getattr(client, "send_raw", None)
+            if callable(send_raw):
+                try:
+                    payload = {"method": method, "params": params}
+                    return await self._maybe_await(send_raw(payload))
+                except Exception:
+                    pass
+        return None
+
+    async def _prepare_browserless_reconnect(
+        self,
+        browser_session: BrowserSession,
+    ) -> Optional[str]:
+        timeout_ms = getattr(settings, "browserless_reconnect_timeout_ms", 60000)
+        response = await self._send_cdp_command(
+            browser_session,
+            "Browserless.reconnect",
+            {"timeout": timeout_ms},
+        )
+        if not isinstance(response, dict):
+            return None
+        reconnect_url = response.get("browserWSEndpoint") or response.get("wsEndpoint")
+        if not reconnect_url:
+            return None
+        return self._ensure_ws_token(reconnect_url)
+
+    async def _refresh_session_via_reconnect(
+        self,
+        db: Session,
+        reconnect_url: str,
+        existing: InstagramSession,
+    ) -> Optional[Dict[str, Any]]:
+        cdp_url = self._ensure_ws_token(reconnect_url)
+        browser_session = self._create_browser_session(cdp_url)
+        try:
+            storage_state = await self._export_storage_state_with_retry(browser_session)
+            if storage_state and self._extract_cookies(storage_state):
+                existing.storage_state = storage_state
+                existing.last_used_at = datetime.utcnow()
+                db.commit()
+                logger.info("Sessao do Instagram reutilizada via reconnect.")
+                return storage_state
+        except Exception as exc:
+            logger.warning("Falha ao reutilizar sessao via reconnect: %s", exc)
+        finally:
+            await self._detach_browser_session(browser_session)
+        return None
+
     def get_cookies(self, storage_state: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Retorna lista de cookies a partir de um storage_state."""
         if not storage_state:
@@ -349,6 +450,12 @@ class BrowserUseAgent:
                 self._touch_session(db, existing)
                 logger.info("Sessao do Instagram reutilizada do banco.")
                 return existing.storage_state
+
+            reconnect_url = self._get_browserless_reconnect_url(existing.storage_state)
+            if reconnect_url:
+                refreshed = await self._refresh_session_via_reconnect(db, reconnect_url, existing)
+                if refreshed:
+                    return refreshed
 
             if settings.browserless_session_enabled:
                 session_info = self._get_browserless_session_info(existing.storage_state)
@@ -446,6 +553,10 @@ class BrowserUseAgent:
 
             if session_info:
                 storage_state["_browserless_session"] = session_info
+
+            reconnect_url = await self._prepare_browserless_reconnect(browser_session)
+            if reconnect_url:
+                storage_state["_browserless_reconnect"] = reconnect_url
 
             session = InstagramSession(
                 instagram_username=settings.instagram_username,
