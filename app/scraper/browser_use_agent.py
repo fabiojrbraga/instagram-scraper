@@ -274,12 +274,13 @@ class BrowserUseAgent:
         """
         Cria BrowserSession tentando desativar compress??o do WebSocket quando suportado.
         """
+        clean_storage_state = self._sanitize_storage_state(storage_state)
         session = None
         ctor_attempts = [
-            dict(cdp_url=cdp_url, storage_state=storage_state, ws_connect_kwargs={"compression": None}, keep_alive=True),
-            dict(cdp_url=cdp_url, storage_state=storage_state, keep_alive=True),
-            dict(cdp_url=cdp_url, storage_state=storage_state, ws_connect_kwargs={"compression": None}),
-            dict(cdp_url=cdp_url, storage_state=storage_state),
+            dict(cdp_url=cdp_url, storage_state=clean_storage_state, ws_connect_kwargs={"compression": None}, keep_alive=True),
+            dict(cdp_url=cdp_url, storage_state=clean_storage_state, keep_alive=True),
+            dict(cdp_url=cdp_url, storage_state=clean_storage_state, ws_connect_kwargs={"compression": None}),
+            dict(cdp_url=cdp_url, storage_state=clean_storage_state),
         ]
         for kwargs in ctor_attempts:
             try:
@@ -288,7 +289,7 @@ class BrowserUseAgent:
             except TypeError:
                 continue
         if session is None:
-            session = BrowserSession(cdp_url=cdp_url, storage_state=storage_state)
+            session = BrowserSession(cdp_url=cdp_url, storage_state=clean_storage_state)
 
         keep_alive_setters = (
             getattr(session, "set_keep_alive", None),
@@ -358,6 +359,23 @@ class BrowserUseAgent:
             return None
         reconnect_url = storage_state.get("_browserless_reconnect")
         return reconnect_url if isinstance(reconnect_url, str) and reconnect_url else None
+
+    def _sanitize_storage_state(self, storage_state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        Playwright aceita apenas cookies/origins no storage_state.
+        """
+        if not storage_state:
+            return None
+        cookies = self._extract_cookies(storage_state)
+        origins = storage_state.get("origins")
+        if not isinstance(origins, list):
+            origins = []
+        if not cookies and not origins:
+            return None
+        return {
+            "cookies": cookies,
+            "origins": origins,
+        }
 
     def _ensure_ws_token(self, ws_url: str) -> str:
         if "token=" in ws_url:
@@ -719,6 +737,12 @@ class BrowserUseAgent:
         """
         max_retries = getattr(settings, 'browser_use_max_retries', 3)
         retry_delay = 5  # segundos
+        reconnect_url = self._get_browserless_reconnect_url(storage_state)
+        clean_storage_state = self._sanitize_storage_state(storage_state)
+        logger.info(
+            "Browser Use recebeu storage_state com %s cookies.",
+            len(self._extract_cookies(storage_state or {})),
+        )
 
         for attempt in range(1, max_retries + 1):
             browser_session = None
@@ -730,7 +754,13 @@ class BrowserUseAgent:
                 if not self.api_key:
                     raise ValueError("OPENAI_API_KEY is required for Browser Use.")
 
-                cdp_url = await self._resolve_browserless_cdp_url()
+                use_reconnect = bool(reconnect_url and attempt == 1)
+                if use_reconnect:
+                    cdp_url = self._ensure_ws_token(reconnect_url)
+                    logger.info("Tentando reaproveitar navegador autenticado via reconnect.")
+                else:
+                    cdp_url = await self._resolve_browserless_cdp_url()
+                    logger.info("Usando CDP padrao com storage_state.")
 
                 task = f"""
                 Você é um raspador de dados do Instagram. Sua tarefa é extrair informações de posts.
@@ -767,12 +797,13 @@ class BrowserUseAgent:
 
                 IMPORTANTE:
                 - Se o perfil for privado, retorne: {{"posts": [], "total_found": 0, "error": "private_profile"}}
+                - Use apenas a aba atual; nao abra nova aba ou janela.
                 - Se não conseguir abrir um post, pule para o próximo
                 - Sempre feche modais antes de abrir outro post
                 - Simule comportamento humano (delays, scroll suave)
                 """
 
-                browser_session = self._create_browser_session(cdp_url, storage_state=storage_state)
+                browser_session = self._create_browser_session(cdp_url, storage_state=clean_storage_state)
                 llm = ChatOpenAI(model=self.model, api_key=self.api_key)
                 agent = self._create_agent(
                     task=task,
@@ -798,6 +829,16 @@ class BrowserUseAgent:
                 if json_match:
                     try:
                         data = json.loads(json_match.group(0))
+                        if data.get("error") == "login_required" and attempt < max_retries:
+                            wait_time = retry_delay * attempt
+                            logger.warning(
+                                "Agente retornou login_required (tentativa %s/%s). Retentando em %ss...",
+                                attempt,
+                                max_retries,
+                                wait_time,
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
                         logger.info(f"✅ Browser Use extraiu {len(data.get('posts', []))} posts")
                         return data  # Sucesso!
                     except json.JSONDecodeError:

@@ -69,3 +69,8 @@ SETUP_SESSAO.md
 CHECKLIST_SESSAO.md
 test_session_persistence.py
 patch.diff
+TROUBLESHOOTING_BROWSERLESS.md
+erros.txt
+diagnostico_browserless.py
+test_browser_use_posts.py
+verificar_perfil.py

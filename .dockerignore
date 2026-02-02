@@ -48,3 +48,5 @@ tests/
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+erros.txt
