@@ -25,6 +25,7 @@ from app.schemas import (
 )
 from app.models import Profile, Post, Interaction, ScrapingJob
 from app.scraper.instagram_scraper import instagram_scraper
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -389,8 +390,9 @@ async def scrape_profile_info(
         )
         result = await instagram_scraper.scrape_profile_info(
             profile_url=normalized_profile_url,
-            db=db if request.save_to_db else None,
-            save_to_db=request.save_to_db,
+            db=db,
+            save_to_db=True,
+            cache_ttl_days=settings.profile_cache_ttl_days,
         )
         return ProfileScrapeResponse(**result)
     except Exception as e:

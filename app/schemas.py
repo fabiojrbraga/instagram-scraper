@@ -62,7 +62,7 @@ class ProfileScrapeRequest(BaseModel):
     profile_url: str = Field(..., description="URL do perfil Instagram a ser extraido")
     save_to_db: bool = Field(
         default=True,
-        description="Se true, persiste/atualiza o perfil na tabela profiles",
+        description="(Legado) Perfil sempre e atualizado na tabela profiles neste endpoint",
     )
 
 

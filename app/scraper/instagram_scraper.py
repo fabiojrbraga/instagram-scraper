@@ -10,7 +10,7 @@ import re
 import json
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.scraper.browserless_client import BrowserlessClient
 from app.scraper.browser_use_agent import browser_use_agent
@@ -497,6 +497,7 @@ class InstagramScraper:
         profile_url: str,
         db: Optional[Session] = None,
         save_to_db: bool = True,
+        cache_ttl_days: int = 0,
     ) -> Dict[str, Any]:
         """
         Extrai somente dados do perfil (sem posts/interações).
@@ -506,6 +507,36 @@ class InstagramScraper:
                 profile_url = f"https://instagram.com/{profile_url}"
 
             username_fallback = self._extract_username_from_url(profile_url)
+            normalized_url = profile_url.rstrip("/") + "/"
+            profile_url = normalized_url
+
+            if db and cache_ttl_days > 0:
+                existing = db.query(Profile).filter(
+                    Profile.instagram_url == normalized_url
+                ).first()
+                if not existing and username_fallback:
+                    existing = db.query(Profile).filter(
+                        Profile.instagram_username == username_fallback
+                    ).first()
+
+                if existing and existing.last_scraped_at:
+                    threshold = datetime.utcnow() - timedelta(days=cache_ttl_days)
+                    if existing.last_scraped_at >= threshold:
+                        return {
+                            "username": existing.instagram_username,
+                            "profile_url": existing.instagram_url,
+                            "bio": existing.bio,
+                            "is_private": bool(existing.is_private),
+                            "follower_count": existing.follower_count,
+                            "following_count": existing.following_count,
+                            "post_count": existing.post_count,
+                            "verified": bool(existing.verified),
+                            "confidence": None,
+                            "profile_id": existing.id,
+                            "last_scraped_at": existing.last_scraped_at,
+                            "extracted_at": datetime.utcnow(),
+                        }
+
             storage_state = await browser_use_agent.ensure_instagram_session(db) if db else None
             cookies = browser_use_agent.get_cookies(storage_state)
 
