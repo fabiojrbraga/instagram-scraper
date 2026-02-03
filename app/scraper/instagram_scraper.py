@@ -492,6 +492,56 @@ class InstagramScraper:
             logger.exception("❌ Erro ao raspar perfil %s: %s", profile_url, e)
             raise
 
+    async def scrape_profile_info(
+        self,
+        profile_url: str,
+        db: Optional[Session] = None,
+        save_to_db: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Extrai somente dados do perfil (sem posts/interações).
+        """
+        try:
+            if not profile_url.startswith("http"):
+                profile_url = f"https://instagram.com/{profile_url}"
+
+            username_fallback = self._extract_username_from_url(profile_url)
+            storage_state = await browser_use_agent.ensure_instagram_session(db) if db else None
+            cookies = browser_use_agent.get_cookies(storage_state)
+
+            profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
+            profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
+            profile_info = await self.ai_extractor.extract_profile_info(
+                screenshot_base64=profile_screenshot,
+                html_content=profile_html,
+            )
+
+            normalized = {
+                "username": profile_info.get("username") or username_fallback,
+                "profile_url": profile_url,
+                "bio": profile_info.get("bio"),
+                "is_private": bool(profile_info.get("is_private", False)),
+                "follower_count": self._to_int_or_none(profile_info.get("follower_count")),
+                "following_count": self._to_int_or_none(profile_info.get("following_count")),
+                "post_count": self._to_int_or_none(profile_info.get("post_count")),
+                "verified": bool(profile_info.get("verified", False)),
+                "confidence": profile_info.get("confidence"),
+                "extracted_at": datetime.utcnow(),
+            }
+
+            if db and save_to_db:
+                profile_db = await self._save_profile(db, profile_url, normalized)
+                normalized["profile_id"] = profile_db.id
+                normalized["last_scraped_at"] = profile_db.last_scraped_at
+            else:
+                normalized["profile_id"] = None
+                normalized["last_scraped_at"] = None
+
+            return normalized
+        except Exception as e:
+            logger.exception("❌ Erro ao extrair dados do perfil %s: %s", profile_url, e)
+            raise
+
     async def scrape_recent_posts_like_users(
         self,
         profile_url: str,
@@ -796,6 +846,8 @@ class InstagramScraper:
                 existing.bio = profile_info.get("bio")
                 existing.is_private = profile_info.get("is_private", False)
                 existing.follower_count = profile_info.get("follower_count")
+                existing.following_count = profile_info.get("following_count")
+                existing.post_count = profile_info.get("post_count")
                 existing.verified = profile_info.get("verified", False)
                 existing.last_scraped_at = datetime.utcnow()
                 db.commit()
@@ -809,6 +861,8 @@ class InstagramScraper:
                     bio=profile_info.get("bio"),
                     is_private=profile_info.get("is_private", False),
                     follower_count=profile_info.get("follower_count"),
+                    following_count=profile_info.get("following_count"),
+                    post_count=profile_info.get("post_count"),
                     verified=profile_info.get("verified", False),
                     last_scraped_at=datetime.utcnow(),
                 )

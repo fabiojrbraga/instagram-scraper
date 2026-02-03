@@ -57,6 +57,31 @@ class ProfileResponse(ProfileBase):
         from_attributes = True
 
 
+class ProfileScrapeRequest(BaseModel):
+    """Schema para scraping direto de um perfil por URL."""
+    profile_url: str = Field(..., description="URL do perfil Instagram a ser extraido")
+    save_to_db: bool = Field(
+        default=True,
+        description="Se true, persiste/atualiza o perfil na tabela profiles",
+    )
+
+
+class ProfileScrapeResponse(BaseModel):
+    """Schema de resposta do scraping direto de perfil."""
+    username: str
+    profile_url: str
+    bio: Optional[str] = None
+    is_private: bool = False
+    follower_count: Optional[int] = None
+    following_count: Optional[int] = None
+    post_count: Optional[int] = None
+    verified: bool = False
+    confidence: Optional[float] = None
+    profile_id: Optional[str] = None
+    last_scraped_at: Optional[datetime] = None
+    extracted_at: datetime
+
+
 # ==================== Post Schemas ====================
 
 class PostBase(BaseModel):

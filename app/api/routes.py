@@ -16,6 +16,8 @@ from app.schemas import (
     ScrapingJobCreate,
     ScrapingJobResponse,
     ScrapingCompleteResponse,
+    ProfileScrapeRequest,
+    ProfileScrapeResponse,
     ProfileResponse,
     PostResponse,
     InteractionResponse,
@@ -369,6 +371,31 @@ async def get_scraping_results(
 
 
 # ==================== Profile Endpoints ====================
+
+@router.post("/profiles/scrape", response_model=ProfileScrapeResponse)
+async def scrape_profile_info(
+    request: ProfileScrapeRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Raspa um perfil específico e retorna somente dados do perfil.
+    """
+    try:
+        normalized_profile_url = _normalize_profile_url(request.profile_url)
+        logger.info(
+            "📥 Requisição de scrape de perfil recebida: %s (normalizado: %s)",
+            request.profile_url,
+            normalized_profile_url,
+        )
+        result = await instagram_scraper.scrape_profile_info(
+            profile_url=normalized_profile_url,
+            db=db if request.save_to_db else None,
+            save_to_db=request.save_to_db,
+        )
+        return ProfileScrapeResponse(**result)
+    except Exception as e:
+        logger.error("❌ Erro ao raspar perfil %s: %s", request.profile_url, e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/profiles/{username}", response_model=ProfileResponse)
 async def get_profile(
