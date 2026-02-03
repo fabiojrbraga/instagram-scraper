@@ -4,6 +4,7 @@ Define as rotas para scraping, consulta de dados, etc.
 """
 
 import logging
+import asyncio
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -568,6 +569,8 @@ async def _scrape_profile_background(job_id: str, profile_url: str, options: dic
 
         opts = dict(options or {})
         flow = (opts.get("flow") or "default").lower().strip()
+        test_mode = bool(opts.get("test_mode", False))
+        test_duration_seconds = int(opts.get("test_duration_seconds", 120))
         default_max_posts = 3 if flow == "recent_likes" else 5
         max_posts = int(opts.get("max_posts", default_max_posts))
         recent_hours = int(opts.get("recent_hours", 24))
@@ -577,7 +580,88 @@ async def _scrape_profile_background(job_id: str, profile_url: str, options: dic
         collect_like_user_profiles = False
 
         # Executar scraping de acordo com o fluxo.
-        if flow == "recent_likes":
+        if test_mode:
+            logger.info(
+                "🧪 Test mode ativo para job %s. Simulando execução por %ss...",
+                job_id,
+                test_duration_seconds,
+            )
+            await asyncio.sleep(test_duration_seconds)
+            fake_profile_url = _normalize_profile_url(profile_url)
+            fake_username = _extract_instagram_username(fake_profile_url) or "dummy_profile"
+            if flow == "recent_likes":
+                result = {
+                    "status": "success",
+                    "flow": "recent_likes",
+                    "profile": {
+                        "username": fake_username,
+                        "profile_url": fake_profile_url,
+                    },
+                    "posts": [
+                        {
+                            "post_url": f"{fake_profile_url}reel/DUMMY001/",
+                            "caption": "Post dummy 1 - modo teste",
+                            "like_count": 12,
+                            "comment_count": 3,
+                            "posted_at": "1h",
+                            "is_recent_24h": True,
+                            "likes_accessible": True,
+                            "like_users": [
+                                "https://www.instagram.com/dummy_user_1/",
+                                "https://www.instagram.com/dummy_user_2/",
+                            ],
+                            "like_users_data": [],
+                            "error": None,
+                        },
+                        {
+                            "post_url": f"{fake_profile_url}reel/DUMMY002/",
+                            "caption": "Post dummy 2 - modo teste",
+                            "like_count": 0,
+                            "comment_count": 0,
+                            "posted_at": "2d",
+                            "is_recent_24h": False,
+                            "likes_accessible": False,
+                            "like_users": [],
+                            "like_users_data": [],
+                            "error": "post_older_than_window",
+                        },
+                    ],
+                    "summary": {
+                        "total_posts": 2,
+                        "recent_posts": 1,
+                        "total_like_users": 2,
+                        "scraped_at": datetime.utcnow().isoformat(),
+                    },
+                }
+            else:
+                result = {
+                    "status": "success",
+                    "flow": "default",
+                    "profile": {
+                        "username": fake_username,
+                        "profile_url": fake_profile_url,
+                        "bio": "Perfil dummy de teste",
+                        "is_private": False,
+                        "follower_count": 1234,
+                        "verified": False,
+                    },
+                    "posts": [
+                        {
+                            "post_url": f"{fake_profile_url}p/DUMMYPOST001/",
+                            "caption": "Post dummy default",
+                            "like_count": 10,
+                            "comment_count": 1,
+                            "posted_at": datetime.utcnow().isoformat(),
+                        }
+                    ],
+                    "interactions": [],
+                    "summary": {
+                        "total_posts": 1,
+                        "total_interactions": 0,
+                        "scraped_at": datetime.utcnow().isoformat(),
+                    },
+                }
+        elif flow == "recent_likes":
             result = await instagram_scraper.scrape_recent_posts_like_users(
                 profile_url=profile_url,
                 max_posts=max_posts,

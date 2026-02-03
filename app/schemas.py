@@ -156,6 +156,16 @@ class ScrapingJobCreate(BaseModel):
         default=False,
         description="(Deprecado no /scrape) Mantido por compatibilidade; atualmente ignorado neste endpoint",
     )
+    test_mode: bool = Field(
+        default=False,
+        description="Se true, nao executa scraping real; simula job em running por alguns segundos e retorna resultado dummy",
+    )
+    test_duration_seconds: int = Field(
+        default=120,
+        ge=1,
+        le=1800,
+        description="Duracao da simulacao em segundos quando test_mode=true",
+    )
 
 
 class ScrapingJobResponse(BaseModel):
