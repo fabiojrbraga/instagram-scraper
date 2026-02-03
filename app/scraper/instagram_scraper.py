@@ -748,7 +748,9 @@ class InstagramScraper:
             Objeto Profile salvo
         """
         try:
-            username = profile_info.get("username")
+            username = profile_info.get("username") or self._extract_username_from_url(profile_url)
+            if not username:
+                raise ValueError("Nao foi possivel determinar username do perfil para persistencia.")
 
             # Verificar se perfil já existe
             existing = db.query(Profile).filter(

@@ -4,10 +4,11 @@ Define as rotas para scraping, consulta de dados, etc.
 """
 
 import logging
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime
-import uuid
+from urllib.parse import urlparse
 
 from app.database import get_db
 from app.schemas import (
@@ -25,6 +26,36 @@ from app.scraper.instagram_scraper import instagram_scraper
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["instagram"])
+
+
+def _extract_instagram_username(profile_url: str) -> str:
+    """Extrai username de URL completa ou valor simples."""
+    value = (profile_url or "").strip()
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        return value.strip("/").split("/")[0].strip()
+
+    parsed = urlparse(value)
+    if "instagram.com" not in parsed.netloc.lower():
+        return ""
+    path_parts = [part for part in parsed.path.split("/") if part]
+    return path_parts[0].strip() if path_parts else ""
+
+
+def _normalize_profile_url(profile_url: str) -> str:
+    """Normaliza URL para formato canônico do Instagram."""
+    username = _extract_instagram_username(profile_url)
+    if username:
+        return f"https://www.instagram.com/{username}/"
+    return (profile_url or "").strip()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ==================== Health Check ====================
@@ -58,12 +89,18 @@ async def start_scraping(
         Informações do job criado
     """
     try:
-        logger.info(f"📥 Requisição de scraping recebida: {request.profile_url}")
+        normalized_profile_url = _normalize_profile_url(request.profile_url)
+        logger.info(
+            "📥 Requisição de scraping recebida: %s (normalizado: %s)",
+            request.profile_url,
+            normalized_profile_url,
+        )
 
         # Criar job de scraping
         request_payload = request.model_dump(mode="json", exclude_unset=True)
+        request_payload["profile_url"] = normalized_profile_url
         job = ScrapingJob(
-            profile_url=request.profile_url,
+            profile_url=normalized_profile_url,
             status="pending",
             metadata_json={"request": request_payload},
         )
@@ -75,7 +112,7 @@ async def start_scraping(
         background_tasks.add_task(
             _scrape_profile_background,
             job_id=job.id,
-            profile_url=request.profile_url,
+            profile_url=normalized_profile_url,
             options={k: v for k, v in request_payload.items() if k != "profile_url"},
         )
 
@@ -182,8 +219,8 @@ async def get_scraping_results(
                         {
                             "post_url": post.get("post_url", ""),
                             "caption": post.get("caption"),
-                            "like_count": int(post.get("like_count", 0) or 0),
-                            "comment_count": int(post.get("comment_count", 0) or 0),
+                            "like_count": _safe_int(post.get("like_count", 0) or 0),
+                            "comment_count": _safe_int(post.get("comment_count", 0) or 0),
                             "interactions": [],
                         }
                         for post in posts
@@ -191,8 +228,8 @@ async def get_scraping_results(
                     ],
                 },
                 extracted_posts=posts,
-                total_posts=int(summary.get("total_posts", len(posts)) or 0),
-                total_interactions=int(summary.get("total_like_users", 0) or 0),
+                total_posts=_safe_int(summary.get("total_posts", len(posts)) or 0),
+                total_interactions=_safe_int(summary.get("total_like_users", 0) or 0),
                 raw_result=flow_result,
                 error_message=job.error_message,
                 completed_at=job.completed_at,
@@ -204,7 +241,76 @@ async def get_scraping_results(
         ).first()
 
         if not profile:
-            raise HTTPException(status_code=404, detail="Perfil não encontrado")
+            normalized_job_url = _normalize_profile_url(job.profile_url)
+            if normalized_job_url and normalized_job_url != job.profile_url:
+                profile = db.query(Profile).filter(
+                    Profile.instagram_url == normalized_job_url
+                ).first()
+
+        if not profile:
+            username = _extract_instagram_username(job.profile_url)
+            if username:
+                profile = db.query(Profile).filter(
+                    Profile.instagram_username == username
+                ).first()
+
+        if not profile and isinstance(flow_result, dict):
+            posts = flow_result.get("posts", []) or []
+            interactions = flow_result.get("interactions", []) or []
+            summary = flow_result.get("summary", {}) or {}
+            profile_payload = flow_result.get("profile", {}) or {}
+            return ScrapingCompleteResponse(
+                job_id=job.id,
+                status=job.status,
+                flow=flow or "default",
+                profile={
+                    "username": profile_payload.get("username") or _extract_instagram_username(job.profile_url),
+                    "profile_url": profile_payload.get("profile_url") or _normalize_profile_url(job.profile_url),
+                    "bio": profile_payload.get("bio"),
+                    "is_private": bool(profile_payload.get("is_private", False)),
+                    "follower_count": profile_payload.get("follower_count"),
+                    "posts": [
+                        {
+                            "post_url": post.get("post_url", ""),
+                            "caption": post.get("caption"),
+                            "like_count": _safe_int(post.get("like_count", 0) or 0),
+                            "comment_count": _safe_int(post.get("comment_count", 0) or 0),
+                            "interactions": [],
+                        }
+                        for post in posts
+                        if post.get("post_url")
+                    ],
+                },
+                total_posts=_safe_int(summary.get("total_posts", len(posts)) or 0),
+                total_interactions=_safe_int(summary.get("total_interactions", len(interactions)) or 0),
+                raw_result=flow_result,
+                error_message=job.error_message,
+                completed_at=job.completed_at,
+            )
+
+        if not profile:
+            logger.warning(
+                "Perfil não encontrado para job %s; retornando resultado baseado no metadata/job sem consulta de perfil.",
+                job.id,
+            )
+            return ScrapingCompleteResponse(
+                job_id=job.id,
+                status=job.status,
+                flow=flow or "default",
+                profile={
+                    "username": _extract_instagram_username(job.profile_url),
+                    "profile_url": _normalize_profile_url(job.profile_url),
+                    "bio": None,
+                    "is_private": False,
+                    "follower_count": None,
+                    "posts": [],
+                },
+                total_posts=_safe_int(job.posts_scraped, 0),
+                total_interactions=_safe_int(job.interactions_scraped, 0),
+                raw_result=flow_result if isinstance(flow_result, dict) else None,
+                error_message=job.error_message,
+                completed_at=job.completed_at,
+            )
 
         # Buscar posts e interações
         posts = db.query(Post).filter(Post.profile_id == profile.id).all()
