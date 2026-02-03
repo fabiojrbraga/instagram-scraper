@@ -103,7 +103,7 @@ def health_check() -> bool:
     """
     try:
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
         logger.error(f"❌ Erro na verificação de saúde do banco: {e}")
