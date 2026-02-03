@@ -8,6 +8,7 @@ import asyncio
 import random
 import re
 import json
+import html as html_lib
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
@@ -150,6 +151,84 @@ class InstagramScraper:
             "comment_count": comment_count if comment_count is not None else 0,
             "posted_at": posted_at,
         }
+
+    def _extract_profile_info_from_html(
+        self,
+        html_content: Optional[str],
+        username_hint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extração determinística de dados de perfil a partir do HTML do Instagram.
+        """
+        if not html_content:
+            return {}
+
+        extracted: Dict[str, Any] = {}
+        text = html_content
+
+        def _bool_from_match(pattern: str) -> Optional[bool]:
+            match = re.search(pattern, text)
+            if not match:
+                return None
+            return match.group(1).lower() == "true"
+
+        def _int_from_match(pattern: str) -> Optional[int]:
+            match = re.search(pattern, text)
+            if not match:
+                return None
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+
+        username_match = re.search(r'"username":"([^"]+)"', text)
+        if username_match:
+            extracted["username"] = username_match.group(1)
+        elif username_hint:
+            extracted["username"] = username_hint
+
+        bio_match = re.search(r'"biography":"((?:\\.|[^"])*)"', text)
+        if bio_match:
+            raw_bio = bio_match.group(1)
+            try:
+                extracted["bio"] = json.loads(f'"{raw_bio}"')
+            except Exception:
+                extracted["bio"] = raw_bio.replace('\\"', '"').replace("\\n", "\n")
+
+        extracted["is_private"] = _bool_from_match(r'"is_private":(true|false)')
+        extracted["verified"] = _bool_from_match(r'"is_verified":(true|false)')
+        extracted["follower_count"] = _int_from_match(r'"edge_followed_by":\{"count":(\d+)')
+        extracted["following_count"] = _int_from_match(r'"edge_follow":\{"count":(\d+)')
+        extracted["post_count"] = _int_from_match(r'"edge_owner_to_timeline_media":\{"count":(\d+)')
+
+        # Fallback via meta description (útil quando o payload principal não vem completo)
+        if any(extracted.get(k) is None for k in ("follower_count", "following_count", "post_count", "bio")):
+            meta_match = re.search(
+                r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+                text,
+                flags=re.IGNORECASE,
+            )
+            if meta_match:
+                og_desc = html_lib.unescape(meta_match.group(1))
+                nums = [self._to_int_or_none(n) for n in re.findall(r"(\d[\d\.,]*)", og_desc)]
+                nums = [n for n in nums if n is not None]
+                if extracted.get("follower_count") is None and len(nums) >= 1:
+                    extracted["follower_count"] = nums[0]
+                if extracted.get("following_count") is None and len(nums) >= 2:
+                    extracted["following_count"] = nums[1]
+                if extracted.get("post_count") is None and len(nums) >= 3:
+                    extracted["post_count"] = nums[2]
+
+                if extracted.get("bio") is None:
+                    bio_desc_match = re.search(r"on Instagram:\s*\"([^\"]+)\"", og_desc, flags=re.IGNORECASE)
+                    if bio_desc_match:
+                        extracted["bio"] = bio_desc_match.group(1).strip()
+
+        # limpeza
+        if isinstance(extracted.get("bio"), str):
+            extracted["bio"] = extracted["bio"].strip() or None
+
+        return extracted
 
     def _merge_posts_data(
         self,
@@ -545,30 +624,47 @@ class InstagramScraper:
             screenshot_error: Optional[str] = None
             html_error: Optional[str] = None
 
-            try:
-                profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
-            except Exception as exc:
-                screenshot_error = str(exc)
-                logger.warning("⚠️ Falha ao capturar screenshot do perfil %s: %s", profile_url, exc)
-
+            # Primeiro tenta HTML (mais leve e tende a conter os campos estruturados).
             try:
                 profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
             except Exception as exc:
                 html_error = str(exc)
                 logger.warning("⚠️ Falha ao obter HTML do perfil %s: %s", profile_url, exc)
 
-            if not profile_screenshot and not profile_html:
-                details = " ; ".join(
-                    item for item in [screenshot_error, html_error] if item
-                )
-                raise RuntimeError(
-                    f"Falha ao obter dados do Browserless para {profile_url}. {details}".strip()
-                )
-
-            profile_info = await self.ai_extractor.extract_profile_info(
-                screenshot_base64=profile_screenshot,
-                html_content=profile_html,
+            html_info = self._extract_profile_info_from_html(profile_html, username_hint=username_fallback)
+            html_is_rich = any(
+                html_info.get(key) is not None
+                for key in ("bio", "follower_count", "following_count", "post_count")
             )
+
+            profile_info: Dict[str, Any] = dict(html_info)
+
+            # Só chama screenshot+IA quando o HTML não trouxe informação suficiente.
+            if not html_is_rich:
+                try:
+                    profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
+                except Exception as exc:
+                    screenshot_error = str(exc)
+                    logger.warning("⚠️ Falha ao capturar screenshot do perfil %s: %s", profile_url, exc)
+
+                if not profile_screenshot and not profile_html:
+                    details = " ; ".join(
+                        item for item in [screenshot_error, html_error] if item
+                    )
+                    raise RuntimeError(
+                        f"Falha ao obter dados do Browserless para {profile_url}. {details}".strip()
+                    )
+
+                ai_info = await self.ai_extractor.extract_profile_info(
+                    screenshot_base64=profile_screenshot,
+                    html_content=profile_html,
+                )
+                if isinstance(ai_info, dict):
+                    profile_info = dict(ai_info)
+                    # dados determinísticos do HTML têm prioridade quando presentes
+                    for key, value in html_info.items():
+                        if value is not None:
+                            profile_info[key] = value
 
             normalized = {
                 "username": profile_info.get("username") or username_fallback,
