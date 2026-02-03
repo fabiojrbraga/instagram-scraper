@@ -623,6 +623,27 @@ class BrowserUseAgent:
             jar.set(name, value, domain=domain, path=path)
         return jar
 
+    def _has_valid_auth_cookie(self, storage_state: Dict[str, Any]) -> bool:
+        """
+        Verifica se existe cookie de autenticação aparentemente válido.
+        """
+        now_ts = datetime.utcnow().timestamp()
+        for cookie in self._extract_cookies(storage_state):
+            if str(cookie.get("name", "")).lower() != "sessionid":
+                continue
+            expires = cookie.get("expires")
+            if expires in (None, -1, "-1"):
+                return True
+            try:
+                expires_ts = float(expires)
+            except (TypeError, ValueError):
+                return True
+            if expires_ts <= 0:
+                return True
+            if expires_ts > now_ts:
+                return True
+        return False
+
     async def _is_session_valid(self, storage_state: Dict[str, Any]) -> bool:
         """
         Verifica se o storage_state ainda representa uma sessao autenticada.
@@ -630,6 +651,11 @@ class BrowserUseAgent:
         cookies = self._extract_cookies(storage_state)
         if not cookies:
             return False
+
+        # Modo padrão: reutilização otimista baseada no cookie de sessão.
+        if not settings.instagram_session_strict_validation:
+            if self._has_valid_auth_cookie(storage_state):
+                return True
 
         jar = self._build_cookie_jar(cookies)
         headers = {
@@ -639,7 +665,7 @@ class BrowserUseAgent:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 resp = await client.get("https://www.instagram.com/accounts/edit/", cookies=jar, headers=headers)
         except Exception:
-            return False
+            return self._has_valid_auth_cookie(storage_state)
 
         if resp.url and "login" in str(resp.url):
             return False
@@ -696,6 +722,11 @@ class BrowserUseAgent:
             return None
         existing = self._get_latest_session(db)
         if existing and existing.storage_state:
+            if not settings.instagram_session_strict_validation:
+                self._touch_session(db, existing)
+                logger.info("Sessao do Instagram reutilizada do banco (validacao estrita desativada).")
+                return existing.storage_state
+
             if await self._is_session_valid(existing.storage_state):
                 self._touch_session(db, existing)
                 logger.info("Sessao do Instagram reutilizada do banco.")
@@ -832,10 +863,18 @@ class BrowserUseAgent:
             if session_info:
                 storage_state["_browserless_session"] = session_info
 
+            # Mantem apenas a sessao mais recente ativa para evitar ambiguidades de reuso.
+            (
+                db.query(InstagramSession)
+                .filter(InstagramSession.is_active.is_(True))
+                .update({InstagramSession.is_active: False}, synchronize_session=False)
+            )
+
             session = InstagramSession(
                 instagram_username=settings.instagram_username,
                 storage_state=storage_state,
                 last_used_at=datetime.utcnow(),
+                is_active=True,
             )
             db.add(session)
             db.commit()
@@ -921,9 +960,9 @@ class BrowserUseAgent:
                     ESTRATÉGIA (obrigatória):
                     1) Abra o perfil e aguarde carregar.
                     2) Faça scroll suave 2-3 vezes para carregar o grid.
-                    3) Colete os primeiros {max_posts} links CANÔNICOS de posts a partir de anchors com href contendo "/p/".
+                    3) Colete os primeiros {max_posts} links CANÔNICOS de posts a partir de anchors com href contendo "/p/" ou "/reel/".
                        - Não clique em ícones SVG, overlays de "Clip" ou elementos decorativos.
-                       - Se precisar clicar, clique no link/anchor do post (href /p/...), não no ícone.
+                       - Se precisar clicar, clique no link/anchor do post (href /p/... ou /reel/...), não no ícone.
                     4) Para cada URL coletada:
                        a) Navegue para a URL do post na MESMA aba (new_tab: false).
                        b) Aguarde carregar.
@@ -938,7 +977,7 @@ class BrowserUseAgent:
                     {{
                       "posts": [
                         {{
-                          "post_url": "https://instagram.com/p/CODIGO/",
+                          "post_url": "https://instagram.com/p/CODIGO/ ou https://instagram.com/reel/CODIGO/",
                           "caption": "texto da caption",
                           "like_count": 123,
                           "comment_count": 45,

@@ -53,12 +53,12 @@ class InstagramScraper:
 
     def _extract_post_urls_from_html(self, html: str, max_posts: int) -> List[str]:
         """
-        Extrai links canônicos de posts (/p/...) a partir do HTML do perfil.
+        Extrai links canônicos de posts/reels (/p/... e /reel/...) a partir do HTML do perfil.
         """
         if not html:
             return []
 
-        matches = re.findall(r'href=["\'](/p/[A-Za-z0-9_-]+/?)(?:\?[^"\']*)?["\']', html)
+        matches = re.findall(r'href=["\'](/(?:p|reel)/[A-Za-z0-9_-]+/?)(?:\?[^"\']*)?["\']', html)
         found: List[str] = []
         for path in matches:
             normalized = path if path.startswith("/") else f"/{path}"
@@ -123,7 +123,7 @@ class InstagramScraper:
             post_url = post_url.strip()
             if post_url.startswith("/p/"):
                 post_url = f"https://www.instagram.com{post_url}"
-            if post_url and "/p/" in post_url and not post_url.endswith("/"):
+            if post_url and ("/p/" in post_url or "/reel/" in post_url) and not post_url.endswith("/"):
                 post_url = f"{post_url}/"
         else:
             post_url = fallback_url

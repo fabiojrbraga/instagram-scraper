@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # Instagram (opcional)
     instagram_username: Optional[str] = None
     instagram_password: Optional[str] = None
+    instagram_session_strict_validation: bool = False
 
     # Application Settings
     log_level: str = "INFO"

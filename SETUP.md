@@ -61,6 +61,7 @@ OPENAI_API_KEY=sk-sua-chave-aqui
 # Instagram (opcional)
 INSTAGRAM_USERNAME=seu_usuario
 INSTAGRAM_PASSWORD=sua_senha
+INSTAGRAM_SESSION_STRICT_VALIDATION=false
 ```
 
 ### 3. Iniciar com Docker Compose
