@@ -128,8 +128,8 @@ class ScrapingJobCreate(BaseModel):
     recent_hours: int = Field(default=24, ge=1, le=168, description="Janela de horas para considerar post recente")
     max_like_users_per_post: int = Field(default=30, ge=1, le=200, description="Maximo de perfis curtidores por post")
     collect_like_user_profiles: bool = Field(
-        default=True,
-        description="Se True, coleta screenshot e extrai dados dos perfis curtidores com IA",
+        default=False,
+        description="(Deprecado no /scrape) Mantido por compatibilidade; atualmente ignorado neste endpoint",
     )
 
 

@@ -524,7 +524,9 @@ async def _scrape_profile_background(job_id: str, profile_url: str, options: dic
         max_posts = int(opts.get("max_posts", default_max_posts))
         recent_hours = int(opts.get("recent_hours", 24))
         max_like_users_per_post = int(opts.get("max_like_users_per_post", 30))
-        collect_like_user_profiles = bool(opts.get("collect_like_user_profiles", True))
+        # Etapa de enriquecimento de perfis curtidores foi removida do /scrape.
+        # Mesmo que venha true na request, forçamos false neste job.
+        collect_like_user_profiles = False
 
         # Executar scraping de acordo com o fluxo.
         if flow == "recent_likes":

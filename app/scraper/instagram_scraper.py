@@ -509,6 +509,10 @@ class InstagramScraper:
         """
         try:
             logger.info("🚀 Iniciando fluxo recent_likes para %s", profile_url)
+            if collect_like_user_profiles:
+                logger.info(
+                    "ℹ️ collect_like_user_profiles foi solicitado, mas está desativado no /scrape."
+                )
 
             if not profile_url.startswith("http"):
                 profile_url = f"https://instagram.com/{profile_url}"
@@ -577,10 +581,8 @@ class InstagramScraper:
 
                 total_like_users += len(post_payload["like_users"])
 
-                if collect_like_user_profiles and post_payload["like_users"]:
-                    for user_url in post_payload["like_users"]:
-                        user_data = await self._extract_like_user_profile(user_url=user_url, cookies=cookies)
-                        post_payload["like_users_data"].append(user_data)
+                # Enriquecimento de perfis curtidores foi removido do /scrape.
+                # Mantemos like_users_data vazio por compatibilidade de contrato.
 
                 extracted_posts.append(post_payload)
 
