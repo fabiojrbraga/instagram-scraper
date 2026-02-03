@@ -6,6 +6,7 @@ Define as rotas para scraping, consulta de dados, etc.
 import logging
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from datetime import datetime
@@ -196,9 +197,11 @@ async def get_scraping_results(
             raise HTTPException(status_code=404, detail="Job não encontrado")
 
         if job.status != "completed":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Job ainda não foi concluído. Status: {job.status}",
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "detail": f"Job ainda n?o foi conclu?do. Status: {job.status}",
+                },
             )
 
         metadata = job.metadata_json or {}
