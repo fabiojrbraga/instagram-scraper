@@ -1300,6 +1300,154 @@ class BrowserUseAgent:
         finally:
             self._cleanup_storage_state_temp_file(storage_state_file)
 
+    async def scrape_profile_basic_info(
+        self,
+        profile_url: str,
+        storage_state: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Extrai dados básicos de um perfil Instagram usando o mesmo fluxo autenticado do Browser Use.
+        """
+        max_retries = getattr(settings, "browser_use_max_retries", 3)
+        retry_delay = 5
+        reconnect_url = self._get_browserless_reconnect_url(storage_state)
+        session_info = self._get_browserless_session_info(storage_state)
+        session_connect_url = session_info.get("connect") if isinstance(session_info.get("connect"), str) else None
+        clean_storage_state = self._sanitize_storage_state(storage_state)
+        storage_state_file = self._write_storage_state_temp_file(storage_state)
+        storage_state_for_session: Optional[Union[Dict[str, Any], str]]
+        storage_state_for_session = storage_state_file or clean_storage_state
+
+        try:
+            for attempt in range(1, max_retries + 1):
+                browser_session = None
+                restore_event_bus = None
+                try:
+                    logger.info(
+                        "🤖 Browser Use: Extraindo dados do perfil %s (tentativa %s/%s)",
+                        profile_url,
+                        attempt,
+                        max_retries,
+                    )
+
+                    use_reconnect = bool(reconnect_url and attempt == 1)
+                    use_session_connect = bool((not reconnect_url) and session_connect_url and attempt == 1)
+                    if use_reconnect:
+                        cdp_url = self._ensure_ws_token(reconnect_url)
+                    elif use_session_connect:
+                        cdp_url = self._ensure_ws_token(session_connect_url)
+                    else:
+                        cdp_url = await self._resolve_browserless_cdp_url()
+
+                    task = f"""
+                    Você está em um navegador autenticado no Instagram.
+                    Extraia os dados do perfil em JSON puro.
+
+                    PERFIL:
+                    - URL: {profile_url}
+
+                    PASSOS:
+                    1) Navegue para a URL do perfil na aba atual.
+                    2) Aguarde a página carregar.
+                    3) Se houver modal de cookies, aceite.
+                    4) Extraia os campos visíveis do perfil.
+
+                    FORMATO (JSON puro):
+                    {{
+                      "username": "string ou null",
+                      "bio": "string ou null",
+                      "is_private": true/false,
+                      "follower_count": número inteiro ou null,
+                      "following_count": número inteiro ou null,
+                      "post_count": número inteiro ou null,
+                      "verified": true/false
+                    }}
+
+                    REGRAS:
+                    - Não abra nova aba.
+                    - Não invente dados.
+                    - Se não conseguir um campo, retorne null.
+                    """
+
+                    browser_session = self._create_browser_session(cdp_url, storage_state=storage_state_for_session)
+                    llm = ChatOpenAI(model=self.model, api_key=self.api_key)
+                    agent = self._create_agent(
+                        task=task,
+                        llm=llm,
+                        browser_session=browser_session,
+                    )
+
+                    restore_event_bus = self._patch_event_bus_for_stop(browser_session)
+                    history = await agent.run()
+                    final_result = history.final_result() or ""
+
+                    if (not history.is_successful()) and self._contains_protocol_error(final_result) and attempt < max_retries:
+                        wait_time = retry_delay * attempt
+                        logger.warning(
+                            "Sessao CDP instavel ao extrair perfil (%s/%s). Retentando em %ss...",
+                            attempt,
+                            max_retries,
+                            wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    data = self._extract_json_object_with_key(final_result, "username")
+                    if data is None:
+                        if self._contains_protocol_error(final_result) and attempt < max_retries:
+                            wait_time = retry_delay * attempt
+                            logger.warning(
+                                "Falha de protocolo ao extrair perfil (%s/%s). Retentando em %ss...",
+                                attempt,
+                                max_retries,
+                                wait_time,
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        return {
+                            "error": "parse_failed",
+                            "raw_result": final_result,
+                        }
+
+                    return data
+
+                except Exception as exc:
+                    error_msg = str(exc).lower()
+                    is_retryable = any(
+                        marker in error_msg
+                        for marker in (
+                            "http 500",
+                            "connection",
+                            "timeout",
+                            "websocket",
+                            "failed to establish",
+                            "protocol error",
+                            "reserved bits",
+                            "client is stopping",
+                        )
+                    )
+                    if is_retryable and attempt < max_retries:
+                        wait_time = retry_delay * attempt
+                        logger.warning(
+                            "⚠️ Tentativa %s/%s falhou ao extrair perfil: %s. Retentando em %ss...",
+                            attempt,
+                            max_retries,
+                            str(exc)[:120],
+                            wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    return {"error": str(exc)}
+                finally:
+                    if callable(restore_event_bus):
+                        restore_event_bus()
+                    if browser_session:
+                        await self._detach_browser_session(browser_session)
+
+            return {"error": "all_retries_failed"}
+        finally:
+            self._cleanup_storage_state_temp_file(storage_state_file)
+
     async def scroll_and_load_more(
         self,
         url: str,

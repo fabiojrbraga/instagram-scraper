@@ -19,6 +19,7 @@ from app.scraper.ai_extractor import AIExtractor
 from app.models import Profile, Post, Interaction, InteractionType
 from app.database import SessionLocal
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
 
@@ -470,105 +471,72 @@ class InstagramScraper:
     ) -> Dict[str, Any]:
         """
         Raspa um perfil completo do Instagram.
-
-        Args:
-            profile_url: URL do perfil (ex: https://instagram.com/username)
-            max_posts: Número máximo de posts a analisar
-            db: Sessão do banco de dados
-
-        Returns:
-            Dicionário com dados extraídos
         """
         try:
-            logger.info(f"🚀 Iniciando scraping do perfil: {profile_url}")
+            logger.info("Iniciando scraping completo do perfil: %s", profile_url)
 
-            # Normalizar URL
             if not profile_url.startswith("http"):
                 profile_url = f"https://instagram.com/{profile_url}"
+            if not profile_url.endswith("/"):
+                profile_url = f"{profile_url}/"
 
             username = self._extract_username_from_url(profile_url)
-
             storage_state = await browser_use_agent.ensure_instagram_session(db) if db else None
             cookies = browser_use_agent.get_cookies(storage_state)
 
-            # FASE 1: Capturar informações do perfil
-            logger.info(f"📸 Capturando informações do perfil: {username}")
-            await asyncio.sleep(self._get_random_delay())
-
-            profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
-            profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
-
-            # FASE 2: Extrair informações do perfil com IA
-            logger.info(f"🧠 Extraindo informações do perfil com IA...")
-            profile_info = await self.ai_extractor.extract_profile_info(
-                screenshot_base64=profile_screenshot,
-                html_content=profile_html,
+            profile_result = await self.scrape_profile_info(
+                profile_url=profile_url,
+                db=db,
+                save_to_db=True,
+                cache_ttl_days=0,
             )
 
-            # FASE 3: Salvar perfil no banco
-            if db:
-                profile_db = await self._save_profile(db, profile_url, profile_info)
-            else:
-                profile_db = None
-
-            # FASE 4: Raspar posts usando Browser Use
-            logger.info(f"📝 Raspando posts do perfil com Browser Use...")
             posts_data = await self._scrape_posts(
-                profile_url,
+                profile_url=profile_url,
                 max_posts=max_posts,
-                profile_html=profile_html,
                 cookies=cookies,
                 storage_state=storage_state,
             )
 
-            # FASE 5: Raspar comentários e interações
-            logger.info(f"💬 Raspando comentários e interações...")
-            interactions = []
-            for post_data in posts_data[:max_posts]:
-                post_interactions = await self._scrape_post_interactions(
-                    post_data["post_url"],
-                    post_data,
+            all_interactions: List[Dict[str, Any]] = []
+            for post_data in posts_data:
+                post_url = post_data.get("post_url")
+                if not post_url:
+                    continue
+                interactions = await self._scrape_post_interactions(
+                    post_url=post_url,
+                    post_data=post_data,
                     cookies=cookies,
                 )
-                interactions.extend(post_interactions)
+                for interaction in interactions:
+                    interaction["_post_url"] = post_url
+                all_interactions.extend(interactions)
 
-            # FASE 6: Salvar dados no banco
-            if db and profile_db:
-                await self._save_posts_and_interactions(
-                    db,
-                    profile_db.id,
-                    posts_data,
-                    interactions,
-                )
+            if db:
+                profile_db = await self._save_profile(db, profile_url, profile_result)
+                await self._save_posts_and_interactions(db, profile_db.id, posts_data, all_interactions)
 
-            # Compilar resultado final
-            result = {
+            return {
                 "status": "success",
+                "flow": "default",
                 "profile": {
-                    "username": profile_info.get("username"),
+                    "username": profile_result.get("username") or username,
                     "profile_url": profile_url,
-                    "bio": profile_info.get("bio"),
-                    "is_private": profile_info.get("is_private", False),
-                    "follower_count": profile_info.get("follower_count"),
-                    "verified": profile_info.get("verified", False),
+                    "bio": profile_result.get("bio"),
+                    "is_private": bool(profile_result.get("is_private", False)),
+                    "follower_count": self._to_int_or_none(profile_result.get("follower_count")),
+                    "verified": bool(profile_result.get("verified", False)),
                 },
                 "posts": posts_data,
-                "interactions": interactions,
+                "interactions": all_interactions,
                 "summary": {
                     "total_posts": len(posts_data),
-                    "total_interactions": len(interactions),
+                    "total_interactions": len(all_interactions),
                     "scraped_at": datetime.utcnow().isoformat(),
                 },
             }
-
-            logger.info(f"✅ Scraping concluído: {username}")
-            logger.info(f"   - Posts: {len(posts_data)}")
-            logger.info(f"   - Interações: {len(interactions)}")
-
-            return result
-
         except Exception as e:
-            logger.exception("❌ Erro ao raspar perfil %s: %s", profile_url, e)
+            logger.exception("Erro ao raspar perfil completo %s: %s", profile_url, e)
             raise
 
     async def scrape_profile_info(
@@ -579,80 +547,105 @@ class InstagramScraper:
         cache_ttl_days: int = 0,
     ) -> Dict[str, Any]:
         """
-        Extrai somente dados do perfil (sem posts/interações).
+        Raspa somente os dados do perfil (sem posts/interacoes).
+        Reutiliza sessao autenticada do Instagram quando disponivel.
         """
         try:
             if not profile_url.startswith("http"):
                 profile_url = f"https://instagram.com/{profile_url}"
+            if not profile_url.endswith("/"):
+                profile_url = f"{profile_url}/"
 
-            username_fallback = self._extract_username_from_url(profile_url)
-            normalized_url = profile_url.rstrip("/") + "/"
-            profile_url = normalized_url
+            username_fallback = self._extract_username_from_url(profile_url).strip().lstrip("@").lower()
 
             if db and cache_ttl_days > 0:
-                existing = db.query(Profile).filter(
-                    Profile.instagram_url == normalized_url
+                ttl_cutoff = datetime.utcnow() - timedelta(days=cache_ttl_days)
+                cached = db.query(Profile).filter(
+                    (Profile.instagram_url == profile_url)
+                    | (func.lower(Profile.instagram_username) == username_fallback)
                 ).first()
-                if not existing and username_fallback:
-                    existing = db.query(Profile).filter(
-                        Profile.instagram_username == username_fallback
-                    ).first()
-
-                if existing and existing.last_scraped_at:
-                    threshold = datetime.utcnow() - timedelta(days=cache_ttl_days)
-                    if existing.last_scraped_at >= threshold:
-                        return {
-                            "username": existing.instagram_username,
-                            "profile_url": existing.instagram_url,
-                            "bio": existing.bio,
-                            "is_private": bool(existing.is_private),
-                            "follower_count": existing.follower_count,
-                            "following_count": existing.following_count,
-                            "post_count": existing.post_count,
-                            "verified": bool(existing.verified),
-                            "confidence": None,
-                            "profile_id": existing.id,
-                            "last_scraped_at": existing.last_scraped_at,
-                            "extracted_at": datetime.utcnow(),
-                        }
+                if cached and cached.last_scraped_at and cached.last_scraped_at >= ttl_cutoff:
+                    logger.info(
+                        "Perfil %s retornado do cache (TTL %s dias).",
+                        cached.instagram_username,
+                        cache_ttl_days,
+                    )
+                    return {
+                        "username": cached.instagram_username,
+                        "profile_url": cached.instagram_url,
+                        "bio": cached.bio,
+                        "is_private": bool(cached.is_private),
+                        "follower_count": cached.follower_count,
+                        "following_count": cached.following_count,
+                        "post_count": cached.post_count,
+                        "verified": bool(cached.verified),
+                        "confidence": 1.0,
+                        "profile_id": cached.id,
+                        "last_scraped_at": cached.last_scraped_at,
+                        "extracted_at": datetime.utcnow(),
+                    }
 
             storage_state = await browser_use_agent.ensure_instagram_session(db) if db else None
             cookies = browser_use_agent.get_cookies(storage_state)
 
-            profile_screenshot: Optional[str] = None
-            profile_html: Optional[str] = None
-            screenshot_error: Optional[str] = None
-            html_error: Optional[str] = None
+            profile_info: Dict[str, Any] = {}
+            browser_use_result: Dict[str, Any] = {}
 
-            # Primeiro tenta HTML (mais leve e tende a conter os campos estruturados).
             try:
-                profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
+                browser_use_result = await browser_use_agent.scrape_profile_basic_info(
+                    profile_url=profile_url,
+                    storage_state=storage_state,
+                )
+                if isinstance(browser_use_result, dict) and not browser_use_result.get("error"):
+                    profile_info.update(browser_use_result)
             except Exception as exc:
-                html_error = str(exc)
-                logger.warning("⚠️ Falha ao obter HTML do perfil %s: %s", profile_url, exc)
+                logger.warning("Browser Use nao conseguiu extrair perfil %s: %s", profile_url, exc)
 
-            html_info = self._extract_profile_info_from_html(profile_html, username_hint=username_fallback)
-            html_is_rich = any(
-                html_info.get(key) is not None
+            profile_html: Optional[str] = None
+            profile_screenshot: Optional[str] = None
+            html_error: Optional[str] = None
+            screenshot_error: Optional[str] = None
+
+            html_info: Dict[str, Any] = {}
+            need_more_data = not any(
+                profile_info.get(key) is not None
                 for key in ("bio", "follower_count", "following_count", "post_count")
             )
 
-            profile_info: Dict[str, Any] = dict(html_info)
+            if need_more_data:
+                try:
+                    profile_html = await self.browserless.get_html(profile_url, cookies=cookies)
+                    html_info = self._extract_profile_info_from_html(profile_html, username_hint=username_fallback)
+                    for key, value in html_info.items():
+                        if profile_info.get(key) is None and value is not None:
+                            profile_info[key] = value
+                except Exception as exc:
+                    html_error = str(exc)
+                    logger.warning("Falha ao obter/parsing HTML do perfil %s: %s", profile_url, exc)
 
-            # Só chama screenshot+IA quando o HTML não trouxe informação suficiente.
-            if not html_is_rich:
+            still_poor = not any(
+                profile_info.get(key) is not None
+                for key in ("bio", "follower_count", "following_count", "post_count")
+            )
+            if still_poor:
                 try:
                     profile_screenshot = await self.browserless.screenshot(profile_url, cookies=cookies)
                 except Exception as exc:
                     screenshot_error = str(exc)
-                    logger.warning("⚠️ Falha ao capturar screenshot do perfil %s: %s", profile_url, exc)
+                    logger.warning("Falha ao capturar screenshot do perfil %s: %s", profile_url, exc)
 
                 if not profile_screenshot and not profile_html:
                     details = " ; ".join(
-                        item for item in [screenshot_error, html_error] if item
+                        item
+                        for item in [
+                            screenshot_error,
+                            html_error,
+                            browser_use_result.get("error") if isinstance(browser_use_result, dict) else None,
+                        ]
+                        if item
                     )
                     raise RuntimeError(
-                        f"Falha ao obter dados do Browserless para {profile_url}. {details}".strip()
+                        f"Falha ao obter dados do perfil para {profile_url}. {details}".strip()
                     )
 
                 ai_info = await self.ai_extractor.extract_profile_info(
@@ -660,14 +653,12 @@ class InstagramScraper:
                     html_content=profile_html,
                 )
                 if isinstance(ai_info, dict):
-                    profile_info = dict(ai_info)
-                    # dados determinísticos do HTML têm prioridade quando presentes
-                    for key, value in html_info.items():
-                        if value is not None:
+                    for key, value in ai_info.items():
+                        if profile_info.get(key) is None and value is not None:
                             profile_info[key] = value
 
             normalized = {
-                "username": profile_info.get("username") or username_fallback,
+                "username": (profile_info.get("username") or username_fallback).strip().lstrip("@").lower(),
                 "profile_url": profile_url,
                 "bio": profile_info.get("bio"),
                 "is_private": bool(profile_info.get("is_private", False)),
@@ -689,7 +680,7 @@ class InstagramScraper:
 
             return normalized
         except Exception as e:
-            logger.exception("❌ Erro ao extrair dados do perfil %s: %s", profile_url, e)
+            logger.exception("Erro ao extrair dados do perfil %s: %s", profile_url, e)
             raise
 
     async def scrape_recent_posts_like_users(
@@ -971,28 +962,26 @@ class InstagramScraper:
         profile_info: Dict[str, Any],
     ) -> Profile:
         """
-        Salva informações do perfil no banco de dados.
-
-        Args:
-            db: Sessão do banco
-            profile_url: URL do perfil
-            profile_info: Informações extraídas
-
-        Returns:
-            Objeto Profile salvo
+        Salva informacoes do perfil no banco de dados.
         """
         try:
             username = profile_info.get("username") or self._extract_username_from_url(profile_url)
             if not username:
                 raise ValueError("Nao foi possivel determinar username do perfil para persistencia.")
 
-            # Verificar se perfil já existe
+            username = str(username).strip().lstrip("@").lower()
+            normalized_profile_url = profile_url.strip()
+            if not normalized_profile_url.endswith("/"):
+                normalized_profile_url = f"{normalized_profile_url}/"
+
             existing = db.query(Profile).filter(
-                Profile.instagram_username == username
+                (func.lower(Profile.instagram_username) == username)
+                | (Profile.instagram_url == normalized_profile_url)
             ).first()
 
             if existing:
-                # Atualizar perfil existente
+                existing.instagram_username = username
+                existing.instagram_url = normalized_profile_url
                 existing.bio = profile_info.get("bio")
                 existing.is_private = profile_info.get("is_private", False)
                 existing.follower_count = profile_info.get("follower_count")
@@ -1001,29 +990,28 @@ class InstagramScraper:
                 existing.verified = profile_info.get("verified", False)
                 existing.last_scraped_at = datetime.utcnow()
                 db.commit()
-                logger.info(f"✅ Perfil atualizado: {username}")
+                logger.info("Perfil atualizado: %s", username)
                 return existing
-            else:
-                # Criar novo perfil
-                profile = Profile(
-                    instagram_username=username,
-                    instagram_url=profile_url,
-                    bio=profile_info.get("bio"),
-                    is_private=profile_info.get("is_private", False),
-                    follower_count=profile_info.get("follower_count"),
-                    following_count=profile_info.get("following_count"),
-                    post_count=profile_info.get("post_count"),
-                    verified=profile_info.get("verified", False),
-                    last_scraped_at=datetime.utcnow(),
-                )
-                db.add(profile)
-                db.commit()
-                db.refresh(profile)
-                logger.info(f"✅ Novo perfil salvo: {username}")
-                return profile
+
+            profile = Profile(
+                instagram_username=username,
+                instagram_url=normalized_profile_url,
+                bio=profile_info.get("bio"),
+                is_private=profile_info.get("is_private", False),
+                follower_count=profile_info.get("follower_count"),
+                following_count=profile_info.get("following_count"),
+                post_count=profile_info.get("post_count"),
+                verified=profile_info.get("verified", False),
+                last_scraped_at=datetime.utcnow(),
+            )
+            db.add(profile)
+            db.commit()
+            db.refresh(profile)
+            logger.info("Novo perfil salvo: %s", username)
+            return profile
 
         except Exception as e:
-            logger.error(f"❌ Erro ao salvar perfil: {e}")
+            logger.error("Erro ao salvar perfil: %s", e)
             db.rollback()
             raise
 
@@ -1069,6 +1057,9 @@ class InstagramScraper:
 
                 # Salvar interações do post
                 for interaction_data in interactions:
+                    interaction_post_url = interaction_data.get("_post_url")
+                    if interaction_post_url and interaction_post_url != post_url:
+                        continue
                     if interaction_data.get("type") == "comment":
                         user_url = interaction_data.get("user_url")
 
