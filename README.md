@@ -77,6 +77,20 @@ BROWSERLESS_TOKEN=your-browserless-token
 OPENAI_API_KEY=sk-your-api-key-here
 ```
 
+### Login humano + import de sessao (sem senha no Browser Use)
+
+Se voce nao quiser expor usuario/senha do Instagram para a IA, use o fluxo manual:
+
+```bash
+# 1) Capturar storage_state apos login humano (abre navegador)
+python scripts/capture_instagram_session.py --mode local
+
+# 2) Importar sessao no banco
+python scripts/import_instagram_session.py --username seu_usuario
+```
+
+Arquivo gerado: `.secrets/instagram_storage_state.json` (ignorado no git).
+
 ### Desenvolvimento Local
 
 ```bash

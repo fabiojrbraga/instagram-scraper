@@ -766,9 +766,6 @@ class BrowserUseAgent:
             logger.warning("?????? Sess??o de banco n??o fornecida; login n??o ser?? persistido.")
             return None
 
-        if not settings.instagram_username or not settings.instagram_password:
-            logger.warning("?????? INSTAGRAM_USERNAME/PASSWORD n??o configurados; login n??o ser?? feito.")
-            return None
         existing = self._get_latest_session(db)
         if existing and existing.storage_state:
             if not settings.instagram_session_strict_validation:
@@ -796,6 +793,13 @@ class BrowserUseAgent:
             existing.is_active = False
             db.commit()
             logger.info("Sessao do Instagram expirada; realizando novo login.")
+
+        if not settings.instagram_username or not settings.instagram_password:
+            logger.warning(
+                "Nenhuma sessao ativa valida no banco e INSTAGRAM_USERNAME/PASSWORD nao configurados; "
+                "login automatico nao sera feito."
+            )
+            return None
 
         last_error = None
         for attempt in range(1, settings.browser_use_max_retries + 1):

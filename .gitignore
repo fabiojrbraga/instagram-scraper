@@ -60,6 +60,7 @@ Thumbs.db
 # Project specific
 .env.production
 secrets/
+.secrets/
 
 # Claude Code
 .claude/
