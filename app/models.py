@@ -136,3 +136,19 @@ class InstagramSession(Base):
 
     def __repr__(self):
         return f"<InstagramSession(username={self.instagram_username}, active={self.is_active})>"
+
+
+class InvestingSession(Base):
+    """Sessoes autenticadas do Investing para reutilizacao."""
+    __tablename__ = "investing_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    investing_username = Column(String(255), nullable=True, index=True)
+    storage_state = Column(JSON, nullable=False)
+    is_active = Column(Boolean, default=True)
+    last_used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<InvestingSession(username={self.investing_username}, active={self.is_active})>"

@@ -23,6 +23,8 @@ from app.schemas import (
     GenericScrapeRequest,
     GenericScrapeResponse,
     GenericScrapeJobResultResponse,
+    InvestingScrapeRequest,
+    InvestingScrapeJobResultResponse,
     ProfileResponse,
     PostResponse,
     InteractionResponse,
@@ -538,6 +540,120 @@ async def get_generic_scrape_results(job_id: str, db: Session = Depends(get_db))
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/investing_scrape", response_model=ScrapingJobResponse)
+async def investing_scrape(
+    request: InvestingScrapeRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Job assincrono de scraping no Investing com sessao autenticada reutilizavel.
+    """
+    try:
+        target_url = (request.url or "").strip()
+        instruction_prompt = (request.prompt or "").strip()
+        if not target_url:
+            raise HTTPException(status_code=400, detail="Campo 'url' e obrigatorio.")
+        if not instruction_prompt:
+            raise HTTPException(status_code=400, detail="Campo 'prompt' e obrigatorio.")
+
+        request_payload = request.model_dump(mode="json", exclude_unset=True)
+        request_payload["url"] = target_url
+
+        job = ScrapingJob(
+            profile_url=target_url,
+            status="pending",
+            metadata_json={
+                "flow": "investing",
+                "request": request_payload,
+            },
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        background_tasks.add_task(
+            _investing_scrape_background,
+            job.id,
+            target_url,
+            instruction_prompt,
+            bool(request.force_login),
+            bool(request.test_mode),
+            int(request.test_duration_seconds),
+        )
+
+        return ScrapingJobResponse(
+            id=job.id,
+            profile_url=job.profile_url,
+            status=job.status,
+            created_at=job.created_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("❌ Erro no investing_scrape para %s: %s", request.url, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/investing_scrape/{job_id}", response_model=ScrapingJobResponse)
+async def get_investing_scrape_status(job_id: str, db: Session = Depends(get_db)):
+    try:
+        job = db.query(ScrapingJob).filter(ScrapingJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job não encontrado")
+
+        return ScrapingJobResponse(
+            id=job.id,
+            profile_url=job.profile_url,
+            status=job.status,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            error_message=job.error_message,
+            posts_scraped=job.posts_scraped,
+            interactions_scraped=job.interactions_scraped,
+            created_at=job.created_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("❌ Erro ao obter status do investing_scrape: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/investing_scrape/{job_id}/results", response_model=InvestingScrapeJobResultResponse)
+async def get_investing_scrape_results(job_id: str, db: Session = Depends(get_db)):
+    try:
+        job = db.query(ScrapingJob).filter(ScrapingJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job não encontrado")
+
+        if job.status not in ("completed", "failed"):
+            return JSONResponse(
+                status_code=200,
+                content={"detail": f"Job ainda não foi concluído. Status: {job.status}"},
+            )
+
+        metadata = job.metadata_json if isinstance(job.metadata_json, dict) else {}
+        request_payload = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+        result_payload = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+
+        return InvestingScrapeJobResultResponse(
+            job_id=job.id,
+            status=job.status,
+            url=str(request_payload.get("url") or job.profile_url),
+            prompt=str(request_payload.get("prompt") or ""),
+            data=result_payload.get("data"),
+            raw_result=result_payload.get("raw_result"),
+            error_message=job.error_message or result_payload.get("error"),
+            completed_at=job.completed_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("❌ Erro ao obter resultado do investing_scrape: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/profiles/{username}", response_model=ProfileResponse)
 async def get_profile(
     username: str,
@@ -912,6 +1028,85 @@ async def _generic_scrape_background(
         logger.info("✅ Generic scrape job concluido: %s", job_id)
     except Exception as e:
         logger.exception("❌ Erro no generic scrape em background: %s", e)
+        if db:
+            job = db.query(ScrapingJob).filter(ScrapingJob.id == job_id).first()
+            if job:
+                job.status = "failed"
+                job.error_message = str(e)
+                job.completed_at = datetime.utcnow()
+                db.commit()
+    finally:
+        if db:
+            db.close()
+
+
+async def _investing_scrape_background(
+    job_id: str,
+    target_url: str,
+    prompt: str,
+    force_login: bool = False,
+    test_mode: bool = False,
+    test_duration_seconds: int = 120,
+):
+    """
+    Executa investing scrape em background garantindo login/sessao persistida.
+    """
+    db = None
+    try:
+        db = next(get_db())
+        job = db.query(ScrapingJob).filter(ScrapingJob.id == job_id).first()
+        if not job:
+            logger.error("Job investing_scrape nao encontrado: %s", job_id)
+            return
+
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        if test_mode:
+            await asyncio.sleep(test_duration_seconds)
+            result = {
+                "status": "success",
+                "url": target_url,
+                "data": {
+                    "title": "Dummy Investing Scrape Result",
+                    "note": "Resultado ficticio de teste",
+                },
+                "raw_result": '{"title":"Dummy Investing Scrape Result","note":"Resultado ficticio de teste"}',
+                "error": None,
+            }
+        else:
+            storage_state = await browser_use_agent.ensure_investing_session(db, force_login=force_login)
+            if not storage_state:
+                raise RuntimeError("Nao foi possivel obter sessao autenticada do Investing.")
+
+            result = await browser_use_agent.generic_scrape(
+                url=target_url,
+                prompt=prompt,
+                storage_state=storage_state,
+            )
+
+        base_metadata = job.metadata_json if isinstance(job.metadata_json, dict) else {}
+        metadata = dict(base_metadata)
+        metadata["flow"] = "investing"
+        metadata["result"] = result
+        job.metadata_json = metadata
+        flag_modified(job, "metadata_json")
+
+        if result.get("error"):
+            job.status = "failed"
+            job.error_message = str(result.get("error"))
+        else:
+            job.status = "completed"
+            job.error_message = None
+
+        job.completed_at = datetime.utcnow()
+        job.posts_scraped = 0
+        job.interactions_scraped = 0
+        db.commit()
+        logger.info("✅ Investing scrape job concluido: %s", job_id)
+    except Exception as e:
+        logger.exception("❌ Erro no investing scrape em background: %s", e)
         if db:
             job = db.query(ScrapingJob).filter(ScrapingJob.id == job_id).first()
             if job:

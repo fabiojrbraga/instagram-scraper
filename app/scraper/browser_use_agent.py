@@ -18,7 +18,7 @@ from browser_use import Agent, BrowserSession, ChatOpenAI
 import httpx
 import websockets
 from config import settings
-from app.models import InstagramSession
+from app.models import InstagramSession, InvestingSession
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -419,7 +419,19 @@ class BrowserUseAgent:
             .first()
         )
 
+    def _get_latest_investing_session(self, db: Session) -> Optional[InvestingSession]:
+        return (
+            db.query(InvestingSession)
+            .filter(InvestingSession.is_active.is_(True))
+            .order_by(InvestingSession.updated_at.desc())
+            .first()
+        )
+
     def _touch_session(self, db: Session, session: InstagramSession) -> None:
+        session.last_used_at = datetime.utcnow()
+        db.commit()
+
+    def _touch_investing_session(self, db: Session, session: InvestingSession) -> None:
         session.last_used_at = datetime.utcnow()
         db.commit()
 
@@ -689,6 +701,29 @@ class BrowserUseAgent:
 
         return resp.status_code == 200
 
+    async def _is_investing_session_valid(self, storage_state: Dict[str, Any]) -> bool:
+        """
+        Validacao simples de sessao do Investing.
+        """
+        cookies = self._extract_cookies(storage_state)
+        if not cookies:
+            return False
+
+        if not settings.investing_session_strict_validation:
+            return True
+
+        jar = self._build_cookie_jar(cookies)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get("https://br.investing.com/", cookies=jar, headers=headers)
+        except Exception:
+            return True
+
+        return resp.status_code == 200
+
     def _should_retry_login_error(self, exc: Exception) -> bool:
         message = str(exc).lower()
         retry_markers = (
@@ -907,6 +942,142 @@ class BrowserUseAgent:
                 await self._safe_stop_session(browser_session)
             if not login_ok and stop_url:
                 await self._stop_browserless_session(stop_url)
+
+    async def ensure_investing_session(
+        self,
+        db: Session,
+        force_login: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Garante uma sessao autenticada do Investing salva no banco.
+        """
+        if db is None:
+            logger.warning("Sessao de banco nao fornecida; sessao do Investing nao sera persistida.")
+            return None
+
+        if not settings.investing_username or not settings.investing_password:
+            logger.warning("INVESTING_USERNAME/PASSWORD nao configurados; login nao sera feito.")
+            return None
+
+        existing = self._get_latest_investing_session(db)
+        if existing and force_login:
+            existing.is_active = False
+            db.commit()
+            existing = None
+            logger.info("Sessao Investing invalida por force_login=true.")
+
+        if existing and existing.storage_state:
+            if not settings.investing_session_strict_validation:
+                self._touch_investing_session(db, existing)
+                logger.info("Sessao do Investing reutilizada do banco (validacao estrita desativada).")
+                return existing.storage_state
+
+            if await self._is_investing_session_valid(existing.storage_state):
+                self._touch_investing_session(db, existing)
+                logger.info("Sessao do Investing reutilizada do banco.")
+                return existing.storage_state
+
+            existing.is_active = False
+            db.commit()
+            logger.info("Sessao do Investing expirada; realizando novo login.")
+
+        last_error = None
+        for attempt in range(1, settings.browser_use_max_retries + 1):
+            try:
+                return await self._login_and_save_investing_session(db)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= settings.browser_use_max_retries or not self._should_retry_login_error(exc):
+                    break
+                delay = settings.browser_use_retry_backoff * attempt
+                logger.warning(
+                    "Login Investing falhou (tentativa %s/%s): %s. Retentando em %ss...",
+                    attempt,
+                    settings.browser_use_max_retries,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        if last_error:
+            raise last_error
+        return None
+
+    async def _login_and_save_investing_session(self, db: Session) -> Dict[str, Any]:
+        logger.info("Iniciando login no Investing via Browser Use...")
+
+        cdp_url = await self._resolve_browserless_cdp_url()
+        browser_session = self._create_browser_session(cdp_url)
+        llm = ChatOpenAI(model=self.model, api_key=self.api_key)
+
+        login_task = f"""
+        Voce esta em um navegador controlado por IA.
+        Acesse https://br.investing.com/.
+
+        Passos:
+        1) Se houver modal de cookies, aceite.
+        2) Clique em entrar/login/sign in.
+        3) Preencha email/usuario com: {settings.investing_username}
+        4) Preencha senha com: {settings.investing_password}
+        5) Envie o formulario de login.
+        6) Aguarde ate confirmar que o usuario esta autenticado.
+        7) Se credenciais invalidas, responda "LOGIN_INVALID".
+
+        Regras:
+        - Use apenas a aba atual.
+        - Nao abra nova aba.
+        - Se houver captcha/challenge nao resolvido, responda "LOGIN_BLOCKED".
+        - Ao final, responda apenas "LOGIN_OK" quando autenticado.
+        """
+
+        agent = self._create_agent(
+            task=login_task,
+            llm=llm,
+            browser_session=browser_session,
+        )
+        login_ok = False
+        restore_event_bus = self._patch_event_bus_for_stop(browser_session)
+        try:
+            history = await agent.run()
+            if not history.is_done() or not history.is_successful():
+                raise RuntimeError("Login Investing nao foi concluido com sucesso.")
+
+            final_text = (history.final_result() or "").strip().upper()
+            if "LOGIN_INVALID" in final_text:
+                raise RuntimeError("Login invalido detectado pelo agente no Investing.")
+            if "LOGIN_BLOCKED" in final_text:
+                raise RuntimeError("Login bloqueado por challenge/captcha no Investing.")
+
+            storage_state = await self._export_storage_state_with_retry(browser_session)
+            if not storage_state or not self._extract_cookies(storage_state):
+                raise RuntimeError("Storage state do Investing nao possui cookies.")
+
+            (
+                db.query(InvestingSession)
+                .filter(InvestingSession.is_active.is_(True))
+                .update({InvestingSession.is_active: False}, synchronize_session=False)
+            )
+
+            session = InvestingSession(
+                investing_username=settings.investing_username,
+                storage_state=storage_state,
+                last_used_at=datetime.utcnow(),
+                is_active=True,
+            )
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+            login_ok = True
+            logger.info("Sessao do Investing salva no banco.")
+            return storage_state
+        finally:
+            if callable(restore_event_bus):
+                restore_event_bus()
+            if login_ok:
+                await self._detach_browser_session(browser_session)
+            else:
+                await self._safe_stop_session(browser_session)
 
 
     async def scrape_profile_posts(
@@ -1467,75 +1638,83 @@ class BrowserUseAgent:
         self,
         url: str,
         prompt: str,
+        storage_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Scraping generico de qualquer site usando Browser Use + Browserless.
         """
         max_retries = getattr(settings, "browser_use_max_retries", 3)
         retry_delay = 3
+        clean_storage_state = self._sanitize_storage_state(storage_state)
+        storage_state_file = self._write_storage_state_temp_file(storage_state)
+        storage_state_for_session: Optional[Union[Dict[str, Any], str]]
+        storage_state_for_session = storage_state_file or clean_storage_state
 
-        for attempt in range(1, max_retries + 1):
-            browser_session = None
-            restore_event_bus = None
-            try:
-                cdp_url = await self._resolve_browserless_cdp_url()
-                browser_session = self._create_browser_session(cdp_url)
-                llm = ChatOpenAI(model=self.model, api_key=self.api_key)
+        try:
+            for attempt in range(1, max_retries + 1):
+                browser_session = None
+                restore_event_bus = None
+                try:
+                    cdp_url = await self._resolve_browserless_cdp_url()
+                    browser_session = self._create_browser_session(cdp_url, storage_state=storage_state_for_session)
+                    llm = ChatOpenAI(model=self.model, api_key=self.api_key)
 
-                task = f"""
-                Voce e um agente de scraping generico.
+                    task = f"""
+                    Voce e um agente de scraping generico.
 
-                URL alvo:
-                - {url}
+                    URL alvo:
+                    - {url}
 
-                Instrucoes do usuario (seguir literalmente):
-                {prompt}
+                    Instrucoes do usuario (seguir literalmente):
+                    {prompt}
 
-                Regras:
-                - Use apenas a aba atual.
-                - Nao invente dados.
-                - Se algo falhar, retorne um JSON com campo "error".
-                - Retorne no final APENAS o formato pedido pelo usuario.
-                """
+                    Regras:
+                    - Use apenas a aba atual.
+                    - Nao invente dados.
+                    - Se algo falhar, retorne um JSON com campo "error".
+                    - Retorne no final APENAS o formato pedido pelo usuario.
+                    """
 
-                agent = self._create_agent(
-                    task=task,
-                    llm=llm,
-                    browser_session=browser_session,
-                )
+                    agent = self._create_agent(
+                        task=task,
+                        llm=llm,
+                        browser_session=browser_session,
+                    )
 
-                restore_event_bus = self._patch_event_bus_for_stop(browser_session)
-                history = await agent.run()
-                final_result = history.final_result() or ""
+                    restore_event_bus = self._patch_event_bus_for_stop(browser_session)
+                    history = await agent.run()
+                    final_result = history.final_result() or ""
 
-                if (not history.is_successful()) and self._contains_protocol_error(final_result) and attempt < max_retries:
-                    await asyncio.sleep(retry_delay * attempt)
-                    continue
+                    if (not history.is_successful()) and self._contains_protocol_error(final_result) and attempt < max_retries:
+                        await asyncio.sleep(retry_delay * attempt)
+                        continue
 
-                parsed = self._extract_first_json_value(final_result)
-                return {
-                    "status": "success",
-                    "url": url,
-                    "data": parsed,
-                    "raw_result": final_result,
-                    "error": None,
-                }
-            except Exception as exc:
-                if attempt < max_retries:
-                    await asyncio.sleep(retry_delay * attempt)
-                    continue
-                return {
-                    "status": "failed",
-                    "url": url,
-                    "data": None,
-                    "raw_result": None,
-                    "error": str(exc),
-                }
-            finally:
-                if callable(restore_event_bus):
-                    restore_event_bus()
-                if browser_session:
-                    await self._detach_browser_session(browser_session)
+                    parsed = self._extract_first_json_value(final_result)
+                    return {
+                        "status": "success",
+                        "url": url,
+                        "data": parsed,
+                        "raw_result": final_result,
+                        "error": None,
+                    }
+                except Exception as exc:
+                    if attempt < max_retries:
+                        await asyncio.sleep(retry_delay * attempt)
+                        continue
+                    return {
+                        "status": "failed",
+                        "url": url,
+                        "data": None,
+                        "raw_result": None,
+                        "error": str(exc),
+                    }
+                finally:
+                    if callable(restore_event_bus):
+                        restore_event_bus()
+                    if browser_session:
+                        await self._detach_browser_session(browser_session)
+        finally:
+            self._cleanup_storage_state_temp_file(storage_state_file)
 
     async def scroll_and_load_more(
         self,

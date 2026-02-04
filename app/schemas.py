@@ -124,6 +124,38 @@ class GenericScrapeJobResultResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class InvestingScrapeRequest(BaseModel):
+    """Schema para scraping no Investing com sessao autenticada."""
+    url: str = Field(..., description="URL alvo dentro do Investing")
+    prompt: str = Field(..., description="Instrucoes de scraping e formato de retorno")
+    force_login: bool = Field(
+        default=False,
+        description="Se true, invalida a sessao salva e faz novo login antes do scraping",
+    )
+    test_mode: bool = Field(
+        default=False,
+        description="Se true, nao executa scraping real; simula um job assincrono",
+    )
+    test_duration_seconds: int = Field(
+        default=120,
+        ge=1,
+        le=1800,
+        description="Duracao da simulacao em segundos quando test_mode=true",
+    )
+
+
+class InvestingScrapeJobResultResponse(BaseModel):
+    """Resultado completo de um job de investing scrape."""
+    job_id: str
+    status: str
+    url: str
+    prompt: str
+    data: Optional[Any] = None
+    raw_result: Optional[str] = None
+    error_message: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
 # ==================== Post Schemas ====================
 
 class PostBase(BaseModel):

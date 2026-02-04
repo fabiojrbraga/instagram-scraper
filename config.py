@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     instagram_password: Optional[str] = None
     instagram_session_strict_validation: bool = False
 
+    # Investing (opcional)
+    investing_username: Optional[str] = None
+    investing_password: Optional[str] = None
+    investing_session_strict_validation: bool = False
+
     # Application Settings
     log_level: str = "INFO"
     max_retries: int = 3
