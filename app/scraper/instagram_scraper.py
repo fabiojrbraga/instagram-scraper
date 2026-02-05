@@ -1224,6 +1224,42 @@ class InstagramScraper:
             limit_hours = max(1, int(recent_days)) * 24 if recent_days is not None else None
             max_scrolls = max(1, int(max_comment_scrolls)) if recent_days is not None else 1
 
+            open_comments_script = """
+(() => {
+  const normalize = (value) => (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\\u0300-\\u036f]/g, "");
+
+  let clicked = 0;
+  const iconTargets = Array.from(document.querySelectorAll("svg[aria-label]"));
+  for (const icon of iconTargets) {
+    const label = normalize(icon.getAttribute("aria-label"));
+    if (label.includes("comment") || label.includes("coment")) {
+      const clickable = icon.closest("button, a, div");
+      if (clickable) {
+        clickable.click();
+        clicked += 1;
+      }
+    }
+  }
+
+  const textTargets = Array.from(document.querySelectorAll("a, button, span, div"));
+  for (const node of textTargets) {
+    const text = normalize(node.innerText || "");
+    if (!text) continue;
+    const hasComment = text.includes("comment") || text.includes("coment");
+    const hasView = text.includes("view") || text.includes("ver") || text.includes("mostrar");
+    if (hasComment && hasView) {
+      node.click();
+      clicked += 1;
+    }
+  }
+
+  return { clicked };
+})();
+"""
+
             scroll_script = """
 (() => {
   const keywords = [
@@ -1250,7 +1286,25 @@ class InstagramScraper:
 })();
 """
 
+            if post_data.get("comment_count", 0) > 0:
+                await self.browserless.execute_script(
+                    post_url,
+                    open_comments_script,
+                    cookies=cookies,
+                    user_agent=user_agent,
+                )
+                await asyncio.sleep(self._get_random_delay(1.0, 2.5))
+
             for attempt in range(max_scrolls):
+                if post_data.get("comment_count", 0) > 0:
+                    await self.browserless.execute_script(
+                        post_url,
+                        open_comments_script,
+                        cookies=cookies,
+                        user_agent=user_agent,
+                    )
+                    await asyncio.sleep(self._get_random_delay(0.5, 1.5))
+
                 comments_screenshot = await self.browserless.screenshot(
                     post_url,
                     cookies=cookies,
