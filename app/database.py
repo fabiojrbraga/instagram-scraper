@@ -49,6 +49,7 @@ def init_db():
     try:
         Base.metadata.create_all(bind=engine)
         _ensure_profiles_full_name_column()
+        _ensure_interactions_post_url_column()
         logger.info("✅ Banco de dados inicializado com sucesso")
     except Exception as e:
         logger.error(f"❌ Erro ao inicializar banco de dados: {e}")
@@ -77,6 +78,52 @@ def _ensure_profiles_full_name_column() -> None:
         logger.info("✅ Coluna profiles.full_name criada com sucesso")
     except Exception as e:
         logger.warning("⚠️ Não foi possível garantir coluna profiles.full_name: %s", e)
+
+
+def _ensure_interactions_post_url_column() -> None:
+    """
+    Garante coluna post_url e índice/unique em interactions para dedupe rápido.
+    """
+    try:
+        inspector = inspect(engine)
+        if "interactions" not in inspector.get_table_names():
+            return
+
+        column_names = {col["name"] for col in inspector.get_columns("interactions")}
+        dialect = engine.dialect.name
+
+        with engine.begin() as conn:
+            if "post_url" not in column_names:
+                if dialect == "postgresql":
+                    conn.execute(text("ALTER TABLE interactions ADD COLUMN IF NOT EXISTS post_url VARCHAR(500)"))
+                else:
+                    conn.execute(text("ALTER TABLE interactions ADD COLUMN post_url VARCHAR(500)"))
+
+            # índice simples por post_url
+            try:
+                index_names = {idx["name"] for idx in inspector.get_indexes("interactions")}
+            except Exception:
+                index_names = set()
+            if "ix_interactions_post_url" not in index_names:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_interactions_post_url ON interactions (post_url)"))
+
+            # unique para dedupe por post_url + user_url + interaction_type
+            try:
+                unique_names = {uc["name"] for uc in inspector.get_unique_constraints("interactions")}
+            except Exception:
+                unique_names = set()
+            if "uq_interactions_post_url_user_url_type" not in unique_names:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "uq_interactions_post_url_user_url_type "
+                        "ON interactions (post_url, user_url, interaction_type)"
+                    )
+                )
+
+        logger.info("✅ Coluna/índices interactions.post_url garantidos com sucesso")
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível garantir interactions.post_url: %s", e)
 
 
 def drop_db():

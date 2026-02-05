@@ -1,6 +1,6 @@
-# Instagram Scraper API
+# BRCOM Scraper API
 
-Sistema de raspagem de dados do Instagram usando IA Generativa, Browser Automation e Browserless.
+Sistema de raspagem de dados de sites usando IA Generativa, Browser Automation e Browserless.
 
 ## 📋 Características
 
@@ -11,35 +11,25 @@ Sistema de raspagem de dados do Instagram usando IA Generativa, Browser Automati
 - **PostgreSQL**: Persistência de dados estruturados
 - **Docker**: Pronto para deploy em EasyPanel e outros ambientes containerizados
 
-## 🏗️ Arquitetura
+## Arquitetura
 
-```
-┌─────────────────────────────────────────────────────┐
-│         FastAPI Backend (Python)                    │
-├─────────────────────────────────────────────────────┤
-│  POST /api/scrape - Inicia scraping                 │
-│  GET  /api/scrape/{job_id} - Status do job          │
-│  GET  /api/scrape/{job_id}/results - Resultados     │
-│  GET  /api/profiles/{username} - Info do perfil     │
-│  GET  /api/profiles/{username}/posts - Posts        │
-│  GET  /api/profiles/{username}/interactions - Ints  │
-├─────────────────────────────────────────────────────┤
-│  Browserless (Headless Browser)                     │
-│  ├─ Screenshots                                     │
-│  ├─ HTML Extraction                                │
-│  └─ JavaScript Execution                           │
-├─────────────────────────────────────────────────────┤
-│  OpenAI API (IA Generativa)                         │
-│  ├─ Vision (Análise de imagens)                     │
-│  └─ GPT-4 Mini (Processamento de texto)             │
-├─────────────────────────────────────────────────────┤
-│  PostgreSQL (Persistência)                          │
-│  ├─ Profiles                                        │
-│  ├─ Posts                                           │
-│  ├─ Interactions                                    │
-│  └─ Scraping Jobs                                   │
-└─────────────────────────────────────────────────────┘
-```
+- **Camada API (FastAPI)**:
+  - endpoints de scraping: `/api/scrape`, `/api/profiles/scrape`, `/api/generic_scrape`, `/api/investing_scrape`
+  - endpoints de consulta: `/api/scrape/{job_id}`, `/api/scrape/{job_id}/results`, `/api/profiles/{username}/*`
+  - endpoints administrativos de sessao: `/api/instagram_sessions`, `/api/instagram_sessions/{session_id}/deactivate`
+- **Autenticacao da API**:
+  - API privada por header (`X-API-Key` por padrao)
+  - excecao padrao: `/api/health`
+- **Orquestracao de scraping**:
+  - `browser-use` para navegacao guiada por LLM
+  - `BrowserlessClient` para screenshot/HTML/execucao JS (com fallback de compatibilidade)
+- **Sessoes Instagram**:
+  - login humano via `scripts/capture_instagram_session.py`
+  - import e persistencia por conta via `scripts/import_instagram_session.py`
+  - selecao de sessao por request usando `session_username`
+- **Persistencia (PostgreSQL)**:
+  - tabelas de dominio: `profiles`, `posts`, `interactions`, `scraping_jobs`
+  - tabelas de sessao: `instagram_sessions`, `investing_sessions`
 
 ## 🚀 Instalação
 
@@ -118,6 +108,9 @@ Observacao: o script de captura salva tambem o `user_agent` da sessao e o scrape
 # Instalar dependências
 pip install -r requirements.txt
 
+# Instalar Chromium para captura manual de sessão local
+python -m playwright install chromium
+
 # Iniciar com Docker Compose
 docker-compose up -d
 
@@ -147,12 +140,18 @@ docker-compose up -d
 
 ## 📚 Uso da API
 
+### Autenticação (API privada)
+
+Quase todos os endpoints exigem chave no header `X-API-Key` (ou o nome configurado em `API_AUTH_HEADER_NAME`).
+Somente `/api/health` é público por padrão.
+
 ### 1. Iniciar Scraping
 
 ```bash
 curl -X POST http://localhost:8000/api/scrape \
+  -H "X-API-Key: change-me" \
   -H "Content-Type: application/json" \
-  -d '{"profile_url": "https://instagram.com/username"}'
+  -d '{"profile_url": "https://instagram.com/username", "session_username": "conta_logada"}'
 ```
 
 Resposta:
@@ -168,13 +167,15 @@ Resposta:
 ### 2. Verificar Status
 
 ```bash
-curl http://localhost:8000/api/scrape/{job_id}
+curl http://localhost:8000/api/scrape/{job_id} \
+  -H "X-API-Key: change-me"
 ```
 
 ### 3. Obter Resultados
 
 ```bash
-curl http://localhost:8000/api/scrape/{job_id}/results
+curl http://localhost:8000/api/scrape/{job_id}/results \
+  -H "X-API-Key: change-me"
 ```
 
 Resposta:
@@ -216,19 +217,36 @@ Resposta:
 ### 4. Obter Perfil
 
 ```bash
-curl http://localhost:8000/api/profiles/username
+curl http://localhost:8000/api/profiles/username \
+  -H "X-API-Key: change-me"
 ```
 
 ### 5. Obter Posts do Perfil
 
 ```bash
-curl http://localhost:8000/api/profiles/username/posts?skip=0&limit=10
+curl http://localhost:8000/api/profiles/username/posts?skip=0&limit=10 \
+  -H "X-API-Key: change-me"
 ```
 
 ### 6. Obter Interações do Perfil
 
 ```bash
-curl http://localhost:8000/api/profiles/username/interactions?skip=0&limit=50
+curl http://localhost:8000/api/profiles/username/interactions?skip=0&limit=50 \
+  -H "X-API-Key: change-me"
+```
+
+### 7. Listar sessões Instagram
+
+```bash
+curl "http://localhost:8000/api/instagram_sessions?active_only=true" \
+  -H "X-API-Key: change-me"
+```
+
+### 8. Desativar sessão Instagram
+
+```bash
+curl -X POST http://localhost:8000/api/instagram_sessions/{session_id}/deactivate \
+  -H "X-API-Key: change-me"
 ```
 
 ## 🗄️ Estrutura do Banco de Dados
@@ -454,5 +472,5 @@ Para suporte, abra uma issue no repositório ou entre em contato.
 
 ---
 
-**Última atualização**: 28 de Janeiro de 2024
+**Última atualização**: 04 de Fevereiro de 2026
 **Versão**: 1.0.0

@@ -2,7 +2,7 @@
 Modelos SQLAlchemy para persistência de dados do Instagram.
 """
 
-from sqlalchemy import Column, String, Integer, Text, Boolean, DateTime, ForeignKey, JSON, Enum
+from sqlalchemy import Column, String, Integer, Text, Boolean, DateTime, ForeignKey, JSON, Enum, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -57,6 +57,7 @@ class Post(Base):
     profile_id = Column(String(36), ForeignKey("profiles.id"), nullable=False, index=True)
     post_url = Column(String(500), unique=True, nullable=False)
     post_id = Column(String(255), nullable=True)  # ID nativo do Instagram
+    post_url = Column(String(500), nullable=True, index=True)
     caption = Column(Text, nullable=True)
     like_count = Column(Integer, default=0)
     comment_count = Column(Integer, default=0)
@@ -78,9 +79,18 @@ class Post(Base):
 class Interaction(Base):
     """Modelo para interações (likes, comentários, etc) no Instagram."""
     __tablename__ = "interactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "post_url",
+            "user_url",
+            "interaction_type",
+            name="uq_interactions_post_url_user_url_type",
+        ),
+    )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     post_id = Column(String(36), ForeignKey("posts.id"), nullable=False, index=True)
+    post_url = Column(String(500), nullable=True, index=True)
     profile_id = Column(String(36), ForeignKey("profiles.id"), nullable=False, index=True)
     user_username = Column(String(255), nullable=False, index=True)
     user_url = Column(String(500), nullable=False)

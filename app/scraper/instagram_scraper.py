@@ -19,7 +19,7 @@ from app.scraper.ai_extractor import AIExtractor
 from app.models import Profile, Post, Interaction, InteractionType
 from app.database import SessionLocal
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 logger = logging.getLogger(__name__)
 
@@ -820,6 +820,7 @@ class InstagramScraper:
             extracted_posts: List[Dict[str, Any]] = []
             total_like_users = 0
             total_recent_posts = 0
+            all_interactions: List[Dict[str, Any]] = []
 
             for post in posts_data[:max_posts]:
                 post_url = post.get("post_url")
@@ -865,6 +866,13 @@ class InstagramScraper:
                         if isinstance(item, str) and item not in dedup_users:
                             dedup_users.append(item)
                     post_payload["like_users"] = dedup_users
+                    for user_url in post_payload["like_users"]:
+                        all_interactions.append({
+                            "type": "like",
+                            "user_url": user_url,
+                            "user_username": self._extract_username_from_url(user_url),
+                            "_post_url": post_url,
+                        })
                 else:
                     post_payload["like_users"] = []
 
@@ -900,7 +908,7 @@ class InstagramScraper:
                     "verified": False,
                 }
                 profile_db = await self._save_profile(db, profile_url, profile_payload)
-                await self._save_posts_and_interactions(db, profile_db.id, extracted_posts, [])
+                await self._save_posts_and_interactions(db, profile_db.id, extracted_posts, all_interactions)
 
             logger.info(
                 "✅ Fluxo recent_likes concluído: posts=%s recentes=%s curtidores=%s",
@@ -1167,32 +1175,57 @@ class InstagramScraper:
 
                 # Salvar interações do post
                 for interaction_data in interactions:
-                    interaction_post_url = interaction_data.get("_post_url")
-                    if interaction_post_url and interaction_post_url != post_url:
+                    interaction_post_url = interaction_data.get("_post_url") or post_url
+                    if not interaction_post_url:
                         continue
-                    if interaction_data.get("type") == "comment":
-                        user_url = interaction_data.get("user_url")
+                    if interaction_post_url != post_url:
+                        continue
 
-                        # Verificar se interação já existe
-                        existing_interaction = db.query(Interaction).filter(
-                            Interaction.post_id == post_id,
-                            Interaction.user_url == user_url,
-                            Interaction.interaction_type == InteractionType.COMMENT,
-                        ).first()
+                    interaction_type_raw = interaction_data.get("type")
+                    if isinstance(interaction_type_raw, InteractionType):
+                        interaction_type = interaction_type_raw
+                    else:
+                        try:
+                            interaction_type = InteractionType(str(interaction_type_raw).strip().lower())
+                        except Exception:
+                            continue
 
-                        if not existing_interaction:
-                            interaction = Interaction(
-                                post_id=post_id,
-                                profile_id=profile_id,
-                                user_username=interaction_data.get("user_username"),
-                                user_url=user_url,
-                                interaction_type=InteractionType.COMMENT,
-                                comment_text=interaction_data.get("comment_text"),
-                                comment_likes=interaction_data.get("comment_likes", 0),
-                                comment_replies=interaction_data.get("comment_replies", 0),
+                    user_url = str(interaction_data.get("user_url") or "").strip()
+                    if not user_url:
+                        continue
+
+                    user_username = str(
+                        interaction_data.get("user_username")
+                        or self._extract_username_from_url(user_url)
+                        or user_url
+                    ).strip()
+
+                    existing_interaction = (
+                        db.query(Interaction)
+                        .filter(Interaction.user_url == user_url)
+                        .filter(Interaction.interaction_type == interaction_type)
+                        .filter(
+                            or_(
+                                Interaction.post_url == interaction_post_url,
+                                (Interaction.post_url.is_(None)) & (Interaction.post_id == post_id),
                             )
-                            db.add(interaction)
+                        )
+                        .first()
+                    )
 
+                    if not existing_interaction:
+                        interaction = Interaction(
+                            post_id=post_id,
+                            profile_id=profile_id,
+                            post_url=interaction_post_url,
+                            user_username=user_username,
+                            user_url=user_url,
+                            interaction_type=interaction_type,
+                            comment_text=(interaction_data.get("comment_text") if interaction_type == InteractionType.COMMENT else None),
+                            comment_likes=(interaction_data.get("comment_likes", 0) if interaction_type == InteractionType.COMMENT else None),
+                            comment_replies=(interaction_data.get("comment_replies", 0) if interaction_type == InteractionType.COMMENT else None),
+                        )
+                        db.add(interaction)
             db.commit()
             logger.info(f"✅ Posts e interações salvos no banco")
 
