@@ -9,6 +9,7 @@ import random
 import re
 import json
 import html as html_lib
+import unicodedata
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
@@ -441,6 +442,132 @@ class InstagramScraper:
 
         return None
 
+    def _parse_absolute_date(self, text: str, now: datetime) -> Optional[datetime]:
+        """
+        Tenta interpretar datas absolutas sem ano (ex: "January 23", "23 de janeiro").
+        Retorna datetime em UTC quando possivel.
+        """
+        if not text:
+            return None
+
+        cleaned = text.strip().lower()
+        if not cleaned:
+            return None
+
+        normalized = unicodedata.normalize("NFD", cleaned)
+        normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        normalized = normalized.replace(",", " ").replace(".", " ")
+        normalized = re.sub(r"\bde\b", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        month_map = {
+            "january": 1,
+            "jan": 1,
+            "february": 2,
+            "feb": 2,
+            "fevereiro": 2,
+            "fev": 2,
+            "march": 3,
+            "mar": 3,
+            "marco": 3,
+            "abril": 4,
+            "apr": 4,
+            "april": 4,
+            "maio": 5,
+            "may": 5,
+            "jun": 6,
+            "june": 6,
+            "junho": 6,
+            "jul": 7,
+            "july": 7,
+            "julho": 7,
+            "aug": 8,
+            "august": 8,
+            "ago": 8,
+            "agosto": 8,
+            "sep": 9,
+            "sept": 9,
+            "september": 9,
+            "set": 9,
+            "setembro": 9,
+            "oct": 10,
+            "october": 10,
+            "out": 10,
+            "outubro": 10,
+            "nov": 11,
+            "november": 11,
+            "novembro": 11,
+            "dec": 12,
+            "december": 12,
+            "dez": 12,
+            "dezembro": 12,
+        }
+
+        tokens = normalized.split()
+        if not tokens:
+            return None
+
+        def _parse_day(token: str) -> Optional[int]:
+            match = re.match(r"(\d{1,2})", token)
+            if not match:
+                return None
+            day = int(match.group(1))
+            if 1 <= day <= 31:
+                return day
+            return None
+
+        def _parse_year(token: Optional[str]) -> Optional[int]:
+            if not token:
+                return None
+            match = re.match(r"(\d{2,4})", token)
+            if not match:
+                return None
+            year = int(match.group(1))
+            if year < 100:
+                year += 2000
+            return year
+
+        for idx, token in enumerate(tokens):
+            month = month_map.get(token)
+            if not month:
+                continue
+
+            day = None
+            year = None
+
+            if idx + 1 < len(tokens):
+                day = _parse_day(tokens[idx + 1])
+                if day is not None and idx + 2 < len(tokens):
+                    year = _parse_year(tokens[idx + 2])
+
+            if day is None and idx > 0:
+                day = _parse_day(tokens[idx - 1])
+                if day is not None and idx + 1 < len(tokens):
+                    year = _parse_year(tokens[idx + 1])
+
+            if day is None:
+                continue
+
+            if year is None:
+                year = now.year
+                try:
+                    candidate = datetime(year, month, day, tzinfo=timezone.utc)
+                except ValueError:
+                    return None
+                if candidate.date() > now.date():
+                    try:
+                        candidate = datetime(year - 1, month, day, tzinfo=timezone.utc)
+                    except ValueError:
+                        return None
+                return candidate
+
+            try:
+                return datetime(year, month, day, tzinfo=timezone.utc)
+            except ValueError:
+                return None
+
+        return None
+
     def _is_recent_post(self, posted_at: Any, recent_days: int = 1) -> bool:
         """
         Determina se o post é recente baseado no texto/valor retornado pelo scraper.
@@ -469,6 +596,10 @@ class InstagramScraper:
             return (now - parsed).total_seconds() <= limit_hours * 3600
         except Exception:
             pass
+
+        absolute_dt = self._parse_absolute_date(text, now)
+        if absolute_dt is not None:
+            return (now - absolute_dt).total_seconds() <= limit_hours * 3600
 
         if text in {"today", "hoje"}:
             return True
