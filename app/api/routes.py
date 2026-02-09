@@ -461,6 +461,19 @@ async def generic_scrape(
         if not instruction_prompt:
             raise HTTPException(status_code=400, detail="Campo 'prompt' e obrigatorio.")
 
+        if session_username:
+            session = _get_active_instagram_session(db, session_username)
+            if not session:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Sessao Instagram '@{session_username}' nao encontrada ou inativa.",
+                )
+            logger.info(
+                "Sessao Instagram selecionada para generic_scrape. id=%s username=%s",
+                session.id,
+                session.instagram_username,
+            )
+
         logger.info("🌐 Requisicao generic_scrape recebida: %s", target_url)
 
         request_payload = request.model_dump(mode="json", exclude_unset=True)
