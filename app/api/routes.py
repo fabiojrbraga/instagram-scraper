@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
 from datetime import datetime
 from urllib.parse import urlparse
@@ -73,6 +74,17 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _normalize_session_username(username: str | None) -> str | None:
     normalized = (username or "").strip().lstrip("@").lower()
     return normalized or None
+
+
+def _get_active_instagram_session(
+    db: Session,
+    session_username: str | None = None,
+) -> InstagramSession | None:
+    query = db.query(InstagramSession).filter(InstagramSession.is_active.is_(True))
+    normalized_username = _normalize_session_username(session_username)
+    if normalized_username:
+        query = query.filter(func.lower(InstagramSession.instagram_username) == normalized_username)
+    return query.order_by(InstagramSession.updated_at.desc()).first()
 
 
 # ==================== Health Check ====================
@@ -443,6 +455,7 @@ async def generic_scrape(
     try:
         target_url = (request.url or "").strip()
         instruction_prompt = (request.prompt or "").strip()
+        session_username = _normalize_session_username(request.session_username)
         if not target_url:
             raise HTTPException(status_code=400, detail="Campo 'url' e obrigatorio.")
         if not instruction_prompt:
@@ -452,6 +465,8 @@ async def generic_scrape(
 
         request_payload = request.model_dump(mode="json", exclude_unset=True)
         request_payload["url"] = target_url
+        if session_username:
+            request_payload["session_username"] = session_username
 
         job = ScrapingJob(
             profile_url=target_url,
@@ -472,6 +487,7 @@ async def generic_scrape(
             instruction_prompt,
             bool(request.test_mode),
             int(request.test_duration_seconds),
+            session_username,
         )
 
         return ScrapingJobResponse(
@@ -1076,6 +1092,7 @@ async def _generic_scrape_background(
     prompt: str,
     test_mode: bool = False,
     test_duration_seconds: int = 120,
+    session_username: str | None = None,
 ):
     """
     Executa generic scrape em background.
@@ -1091,6 +1108,19 @@ async def _generic_scrape_background(
         job.status = "running"
         job.started_at = datetime.utcnow()
         db.commit()
+
+        storage_state = None
+        normalized_session_username = _normalize_session_username(session_username)
+        if not test_mode:
+            session = _get_active_instagram_session(db, normalized_session_username)
+            if normalized_session_username and not session:
+                raise RuntimeError(
+                    f"Sessao Instagram '@{normalized_session_username}' nao encontrada ou inativa."
+                )
+            if session and isinstance(session.storage_state, dict):
+                session.last_used_at = datetime.utcnow()
+                db.commit()
+                storage_state = session.storage_state
 
         if test_mode:
             await asyncio.sleep(test_duration_seconds)
@@ -1108,6 +1138,7 @@ async def _generic_scrape_background(
             result = await browser_use_agent.generic_scrape(
                 url=target_url,
                 prompt=prompt,
+                storage_state=storage_state,
             )
 
         base_metadata = job.metadata_json if isinstance(job.metadata_json, dict) else {}

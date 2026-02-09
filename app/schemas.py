@@ -94,6 +94,10 @@ class GenericScrapeRequest(BaseModel):
     """Schema para scraping generico de qualquer pagina web."""
     url: str = Field(..., description="URL da pagina a ser raspada")
     prompt: str = Field(..., description="Instrucoes de scraping e formato de retorno")
+    session_username: Optional[str] = Field(
+        default=None,
+        description="Username da sessao Instagram a reutilizar (opcional)",
+    )
     test_mode: bool = Field(
         default=False,
         description="Se true, nao executa scraping real; simula um job assincrono",

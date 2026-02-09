@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     api_keys: Optional[str] = None  # comma-separated list
     api_key: Optional[str] = None   # backward-compatible single key
     api_auth_header_name: str = "X-API-Key"
-    api_auth_public_paths: str = "/api/health"
+    api_auth_public_paths: str = "/api/health,/docs,/openapi.json"
     profile_cache_ttl_days: int = 2
 
     class Config:
