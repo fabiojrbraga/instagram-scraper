@@ -719,6 +719,14 @@ class BrowserUseAgent:
 
         return resp.status_code == 200
 
+    async def is_instagram_session_valid(self, storage_state: Optional[Dict[str, Any]]) -> bool:
+        """
+        Valida se um storage_state representa uma sessao autenticada do Instagram.
+        """
+        if not isinstance(storage_state, dict):
+            return False
+        return await self._is_session_valid(storage_state)
+
     async def _is_investing_session_valid(self, storage_state: Dict[str, Any]) -> bool:
         """
         Validacao simples de sessao do Investing.

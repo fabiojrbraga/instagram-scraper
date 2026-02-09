@@ -1118,9 +1118,18 @@ async def _generic_scrape_background(
                     f"Sessao Instagram '@{normalized_session_username}' nao encontrada ou inativa."
                 )
             if session and isinstance(session.storage_state, dict):
-                session.last_used_at = datetime.utcnow()
-                db.commit()
-                storage_state = session.storage_state
+                is_valid = await browser_use_agent.is_instagram_session_valid(session.storage_state)
+                if not is_valid:
+                    session.is_active = False
+                    db.commit()
+                    if normalized_session_username:
+                        raise RuntimeError(
+                            f"Sessao Instagram '@{normalized_session_username}' expirada ou invalida."
+                        )
+                else:
+                    session.last_used_at = datetime.utcnow()
+                    db.commit()
+                    storage_state = session.storage_state
 
         if test_mode:
             await asyncio.sleep(test_duration_seconds)
@@ -1148,9 +1157,15 @@ async def _generic_scrape_background(
         job.metadata_json = metadata
         flag_modified(job, "metadata_json")
 
-        if result.get("error"):
+        error_message = result.get("error")
+        if not error_message and isinstance(result.get("data"), dict):
+            error_message = result["data"].get("error")
+        if result.get("status") == "failed" and not error_message:
+            error_message = "generic_scrape_failed"
+
+        if error_message:
             job.status = "failed"
-            job.error_message = str(result.get("error"))
+            job.error_message = str(error_message)
         else:
             job.status = "completed"
             job.error_message = None
