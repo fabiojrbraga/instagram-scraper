@@ -6,7 +6,7 @@ Usa OpenAI Vision + GPT para extrair dados estruturados de screenshots e HTML.
 import json
 import logging
 from typing import Optional, Dict, Any, List
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -22,8 +22,66 @@ class AIExtractor:
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model_vision = settings.openai_model_vision  # Para análise de imagens
         self.model_text = settings.openai_model_text  # Para processamento de texto (mais barato)
+        self.fallback_model_text = (settings.openai_fallback_model_text or "").strip() or None
+        self.fallback_model_vision = (settings.openai_fallback_model_vision or "").strip() or None
         self.temperature_text = settings.openai_temperature_text
         self.temperature_vision = settings.openai_temperature_vision
+
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        if isinstance(exc, RateLimitError):
+            return True
+        if getattr(exc, "status_code", None) == 429:
+            return True
+        lowered = str(exc).lower()
+        markers = (
+            "rate limit",
+            "rate_limit_exceeded",
+            "too many requests",
+            "error code: 429",
+            "tpm",
+            "tokens per min",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _resolve_fallback_model(self, primary_model: str) -> Optional[str]:
+        if primary_model == self.model_vision:
+            candidate = self.fallback_model_vision or self.fallback_model_text
+        else:
+            candidate = self.fallback_model_text
+        candidate = (candidate or "").strip() or None
+        if not candidate or candidate == primary_model:
+            return None
+        return candidate
+
+    async def _chat_completion_with_fallback(
+        self,
+        *,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+    ):
+        try:
+            return await self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+        except Exception as exc:
+            if not self._is_rate_limit_error(exc):
+                raise
+            fallback_model = self._resolve_fallback_model(model)
+            if not fallback_model:
+                raise
+            logger.warning(
+                "Rate limit no modelo %s; tentando fallback %s.",
+                model,
+                fallback_model,
+            )
+            return await self.client.chat.completions.create(
+                model=fallback_model,
+                messages=messages,
+                temperature=temperature,
+            )
 
     async def extract_profile_info(
         self,
@@ -97,7 +155,7 @@ class AIExtractor:
                     }
                 )
 
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion_with_fallback(
                 model=self.model_text,
                 messages=messages,
                 temperature=self.temperature_text,
@@ -193,7 +251,7 @@ class AIExtractor:
                     }
                 )
 
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion_with_fallback(
                 model=self.model_text,
                 messages=messages,
                 temperature=self.temperature_text,
@@ -284,7 +342,7 @@ class AIExtractor:
                     }
                 )
 
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion_with_fallback(
                 model=self.model_text,
                 messages=messages,
                 temperature=self.temperature_text,
@@ -367,7 +425,7 @@ class AIExtractor:
                     }
                 )
 
-            response = await self.client.chat.completions.create(
+            response = await self._chat_completion_with_fallback(
                 model=self.model_text,
                 messages=messages,
                 temperature=self.temperature_text,

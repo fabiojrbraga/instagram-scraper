@@ -35,6 +35,11 @@ class BrowserUseAgent:
 
     def __init__(self):
         self.model = settings.openai_model_text
+        self.fallback_model = (
+            (settings.openai_fallback_model_text or "").strip() or None
+        )
+        if self.fallback_model == self.model:
+            self.fallback_model = None
         self.api_key = settings.openai_api_key
         self.browserless_host = settings.browserless_host
         self.browserless_token = settings.browserless_token
@@ -50,6 +55,8 @@ class BrowserUseAgent:
             log.propagate = True
         self._patch_websocket_compression(self.ws_compression_mode)
         logger.info("Browser Use WebSocket compression mode: %s", self.ws_compression_mode)
+        if self.fallback_model:
+            logger.info("Browser Use fallback model enabled: %s -> %s", self.model, self.fallback_model)
 
     _ws_patched = False
     _ws_patch_mode = "auto"
@@ -400,6 +407,7 @@ class BrowserUseAgent:
             "task": task,
             "llm": llm,
             "browser_session": browser_session,
+            "fallback_llm": self._create_fallback_llm(),
             "auto_close": False,
             "close_browser": False,
             "keep_browser_open": True,
@@ -411,6 +419,11 @@ class BrowserUseAgent:
         except Exception:
             allowed = possible_kwargs
         return Agent(**allowed)
+
+    def _create_fallback_llm(self) -> Optional[ChatOpenAI]:
+        if not self.fallback_model:
+            return None
+        return ChatOpenAI(model=self.fallback_model, api_key=self.api_key)
 
     def _get_latest_session(
         self,
@@ -518,6 +531,59 @@ class BrowserUseAgent:
             "sent 1002",
         )
         return any(marker in lowered for marker in markers)
+
+    def _contains_rate_limit_error(self, text: Optional[str]) -> bool:
+        if not text:
+            return False
+        lowered = str(text).lower()
+        markers = (
+            "rate limit",
+            "rate_limit_exceeded",
+            "too many requests",
+            "error code: 429",
+            "http/1.1 429",
+            "modelratelimiterror",
+            "tokens per min",
+            "tpm",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _history_errors_text(self, history: Any) -> str:
+        if history is None:
+            return ""
+        try:
+            errors = history.errors()
+        except Exception:
+            return ""
+        if not isinstance(errors, list):
+            return ""
+        parts: List[str] = []
+        for item in errors:
+            if item:
+                parts.append(str(item))
+        return " | ".join(parts)
+
+    def _classify_agent_failure_error(
+        self,
+        final_result: str = "",
+        history: Any = None,
+        exc: Optional[Exception] = None,
+    ) -> str:
+        history_errors = self._history_errors_text(history)
+        combined = " | ".join(
+            part
+            for part in (
+                final_result or "",
+                history_errors,
+                str(exc) if exc else "",
+            )
+            if part
+        )
+        if self._contains_rate_limit_error(combined):
+            return "rate_limit_exceeded"
+        if self._contains_protocol_error(combined):
+            return "protocol_error"
+        return "parse_failed"
 
     def _extract_json_object_with_key(self, text: str, key: str) -> Optional[Dict[str, Any]]:
         if not text:
@@ -1283,11 +1349,15 @@ class BrowserUseAgent:
                         )
                         await asyncio.sleep(wait_time)
                         continue
+                    failure_error = self._classify_agent_failure_error(
+                        final_result=final_result,
+                        history=history,
+                    )
                     return {
                         "posts": [],
                         "total_found": 0,
                         "raw_result": final_result,
-                        "error": "parse_failed"
+                        "error": failure_error,
                     }
 
                 except Exception as e:
@@ -1436,7 +1506,7 @@ class BrowserUseAgent:
 
                     data = self._extract_json_object_with_key(final_result, "likes_accessible")
                     if data is None:
-                        logger.warning("⚠️ Falha ao extrair JSON de curtidores: %s", final_result[:180])
+                        logger.warning("Falha ao extrair JSON de curtidores: %s", final_result[:180])
                         if self._contains_protocol_error(final_result) and attempt < max_retries:
                             wait_time = retry_delay * attempt
                             logger.warning(
@@ -1447,13 +1517,18 @@ class BrowserUseAgent:
                             )
                             await asyncio.sleep(wait_time)
                             continue
+                        failure_error = self._classify_agent_failure_error(
+                            final_result=final_result,
+                            history=history,
+                        )
                         return {
                             "post_url": post_url,
                             "likes_accessible": False,
                             "like_users": [],
-                            "error": "parse_failed",
-                            "raw_result": final_result,
+                            "error": failure_error,
+                            "raw_result": final_result or self._history_errors_text(history),
                         }
+
 
                     if data.get("error") == "login_required" and attempt < max_retries:
                         wait_time = retry_delay * attempt
@@ -1487,6 +1562,14 @@ class BrowserUseAgent:
                     }
 
                 except Exception as exc:
+                    failure_error = self._classify_agent_failure_error(exc=exc)
+                    if failure_error == "rate_limit_exceeded":
+                        return {
+                            "post_url": post_url,
+                            "likes_accessible": False,
+                            "like_users": [],
+                            "error": failure_error,
+                        }
                     error_msg = str(exc).lower()
                     is_retryable = any(
                         marker in error_msg
@@ -1638,8 +1721,12 @@ class BrowserUseAgent:
                             )
                             await asyncio.sleep(wait_time)
                             continue
+                        failure_error = self._classify_agent_failure_error(
+                            final_result=final_result,
+                            history=history,
+                        )
                         return {
-                            "error": "parse_failed",
+                            "error": failure_error,
                             "raw_result": final_result,
                         }
 
