@@ -6,7 +6,7 @@ Define as rotas para scraping, consulta de dados, etc.
 import logging
 import asyncio
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -447,6 +447,7 @@ async def scrape_profile_info_get_not_allowed():
 async def generic_scrape(
     request: GenericScrapeRequest,
     background_tasks: BackgroundTasks,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
     """
@@ -456,6 +457,25 @@ async def generic_scrape(
         target_url = (request.url or "").strip()
         instruction_prompt = (request.prompt or "").strip()
         session_username = _normalize_session_username(request.session_username)
+        if not session_username:
+            for key in (
+                "session_username",
+                "sessionUsername",
+                "sessionUserName",
+                "instagram_username",
+                "instagramUsername",
+                "instagramUserName",
+            ):
+                raw_value = http_request.query_params.get(key)
+                if raw_value:
+                    session_username = _normalize_session_username(raw_value)
+                    if session_username:
+                        logger.info(
+                            "session_username obtido via query param. key=%s value=%s",
+                            key,
+                            session_username,
+                        )
+                    break
         if not target_url:
             raise HTTPException(status_code=400, detail="Campo 'url' e obrigatorio.")
         if not instruction_prompt:
@@ -989,7 +1009,7 @@ async def _scrape_profile_background(job_id: str, profile_url: str, options: dic
                             "like_count": 12,
                             "comment_count": 3,
                             "posted_at": "1h",
-                            "is_recent_24h": True,
+                            "is_recent": True,
                             "likes_accessible": True,
                             "like_users": [
                                 "https://www.instagram.com/dummy_user_1/",
@@ -1004,7 +1024,7 @@ async def _scrape_profile_background(job_id: str, profile_url: str, options: dic
                             "like_count": 0,
                             "comment_count": 0,
                             "posted_at": "2d",
-                            "is_recent_24h": False,
+                            "is_recent": False,
                             "likes_accessible": False,
                             "like_users": [],
                             "like_users_data": [],

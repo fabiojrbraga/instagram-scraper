@@ -323,7 +323,7 @@ class ScrapingRecentPostResult(BaseModel):
     like_count: int = 0
     comment_count: int = 0
     posted_at: Optional[str] = None
-    is_recent_24h: bool = False
+    is_recent: bool = False
     likes_accessible: bool = False
     like_users: List[str] = []
     like_users_data: List[ScrapingLikeUserResult] = []

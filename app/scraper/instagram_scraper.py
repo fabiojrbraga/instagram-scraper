@@ -422,7 +422,7 @@ class InstagramScraper:
 
         patterns = [
             (r"(\d+(?:[.,]\d+)?)\s*(?:s|seg|segs|segundo|segundos|sec|secs|second|seconds)\b", 1 / 3600),
-            (r"(\d+(?:[.,]\d+)?)\s*(?:m|min|mins|minuto|minutos)\b", 1 / 60),
+            (r"(\d+(?:[.,]\d+)?)\s*(?:m|min|mins|minute|minutes|minuto|minutos)\b", 1 / 60),
             (r"(\d+(?:[.,]\d+)?)\s*(?:h|hr|hrs|hour|hours|hora|horas)\b", 1),
             (r"(\d+(?:[.,]\d+)?)\s*(?:d|day|days|dia|dias)\b", 24),
             (r"(\d+(?:[.,]\d+)?)\s*(?:w|wk|wks|week|weeks|sem|semana|semanas)\b", 24 * 7),
@@ -1007,7 +1007,7 @@ class InstagramScraper:
                     "like_count": post.get("like_count", 0),
                     "comment_count": post.get("comment_count", 0),
                     "posted_at": posted_at,
-                    "is_recent_24h": is_recent,
+                    "is_recent": is_recent,
                     "likes_accessible": False,
                     "like_users": [],
                     "like_users_data": [],
